@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Still North · Forge</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<div class="aurora"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">❄</span>
+    <div>
+      <h1>STILL NORTH <span>· FORGE</span></h1>
+      <p>HTML prompts → FLUX.2 → Wan 2.2 → long loops · staged batch pipeline</p>
+    </div>
+  </div>
+  <div class="health" id="health">
+    <span class="pill" id="pill-comfy">ComfyUI …</span>
+    <span class="pill" id="pill-ffmpeg">ffmpeg …</span>
+  </div>
+</header>
+
+<main>
+  <section class="card drop-card">
+    <div id="dropzone" class="dropzone">
+      <div class="dz-inner">
+        <div class="dz-icon">⬇</div>
+        <p class="dz-title">Drop HTML prompt files here</p>
+        <p class="dz-sub">or <button id="browse" class="link">browse</button> · add more anytime, even mid-batch</p>
+        <input id="file" type="file" accept=".html,.htm" multiple hidden />
+      </div>
+    </div>
+    <div class="controls">
+      <button id="run" class="btn primary">▶ Run / Resume</button>
+      <button id="cancel" class="btn">⏸ Cancel</button>
+      <button id="clear" class="btn ghost">✕ Clear queue</button>
+    </div>
+    <div id="toast" class="toast"></div>
+  </section>
+
+  <section class="card progress-card">
+    <div class="stage-line">
+      <span id="stage-label" class="stage-label">idle</span>
+      <span id="stage-pct" class="stage-pct">0%</span>
+    </div>
+    <div class="bar"><div id="bar-fill" class="bar-fill"></div></div>
+    <div id="stage-detail" class="stage-detail">waiting for input</div>
+
+    <div class="pipeline" id="pipeline"></div>
+  </section>
+
+  <div class="grid">
+    <section class="card vram-card">
+      <h2>GPU VRAM</h2>
+      <div class="gauge"><div id="vram-fill" class="gauge-fill"></div></div>
+      <div class="vram-text"><span id="vram-val">—</span><span id="vram-name"></span></div>
+    </section>
+
+    <section class="card queue-card">
+      <h2>Queue <span id="queue-total" class="muted"></span></h2>
+      <ul id="queue" class="queue"></ul>
+    </section>
+  </div>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

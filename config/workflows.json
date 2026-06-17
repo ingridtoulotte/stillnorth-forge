@@ -1,0 +1,19 @@
+{
+  "_comment": "Node-id maps into the two ComfyUI API-format workflows in workflows/. If you re-export a workflow from ComfyUI and the node ids change, fix them here only -- no Python edits needed. Find ids with:  python -m stillnorth nodes <workflows/xxx.json>",
+
+  "flux": {
+    "file": "workflows/image_flux2_text_to_image.json",
+    "node_text":  "98:6",  "field_text":  "text",
+    "node_seed":  "98:25", "field_seed":  "noise_seed",
+    "node_save":  "9",     "field_save":  "filename_prefix"
+  },
+
+  "wan": {
+    "file": "workflows/Landscape_Aerial_Wan2.2_LoRAstack.json",
+    "node_image":  "79", "field_image":  "image",
+    "node_text":   "81", "field_text":   "text",
+    "node_camera": "87", "field_pose":   "camera_pose", "field_speed": "speed",
+    "node_seed":   "71", "field_seed":   "noise_seed",
+    "node_save":   "73", "field_save":   "filename_prefix"
+  }
+}

@@ -1,0 +1,17 @@
+# StillNorth Forge runtime.
+#
+# The server, queue, HTML extraction, ffmpeg orchestration and ComfyUI client
+# are PURE STANDARD LIBRARY -- nothing to install for those.
+#
+# Only the CLIP classify stage needs extra packages, and they should be
+# installed into the SAME Python environment as your ComfyUI (torch already
+# lives there). Install on demand:
+#
+#   pip install open_clip_torch pillow
+#
+# torch is intentionally not pinned here: use the build that matches your CUDA
+# / ComfyUI install. On first run the classifier downloads the ViT-L-14
+# laion2b weights (~1.7 GB) once.
+
+open_clip_torch>=2.20
+pillow>=9.0

@@ -1,0 +1,109 @@
+:root{
+  --bg:#070b12; --bg2:#0c1320; --panel:rgba(18,27,42,.72); --panel2:rgba(28,40,60,.55);
+  --line:rgba(120,160,210,.16); --text:#e7eef8; --muted:#8aa0bd;
+  --accent:#5ad1c4; --accent2:#7aa2ff; --accent3:#a98bff;
+  --ok:#46d18a; --warn:#ffb454; --bad:#ff6b7a;
+  --radius:16px; --shadow:0 12px 40px rgba(0,0,0,.45);
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{
+  font-family:"Segoe UI",system-ui,-apple-system,sans-serif;
+  background:radial-gradient(1200px 700px at 70% -10%,#10203a 0%,var(--bg) 55%) fixed,var(--bg);
+  color:var(--text); min-height:100vh; overflow-x:hidden;
+}
+.aurora{
+  position:fixed; inset:-30% -10% auto -10%; height:70vh; z-index:0; filter:blur(70px); opacity:.5;
+  background:
+    radial-gradient(40% 60% at 20% 30%,rgba(90,209,196,.5),transparent 70%),
+    radial-gradient(45% 55% at 60% 20%,rgba(122,162,255,.45),transparent 70%),
+    radial-gradient(40% 50% at 85% 40%,rgba(169,139,255,.4),transparent 70%);
+  animation:drift 18s ease-in-out infinite alternate; pointer-events:none;
+}
+@keyframes drift{from{transform:translateX(-3%) translateY(-2%)}to{transform:translateX(4%) translateY(3%)}}
+
+.topbar,main{position:relative; z-index:1}
+.topbar{
+  display:flex; justify-content:space-between; align-items:center; gap:16px;
+  padding:22px clamp(16px,4vw,48px); flex-wrap:wrap;
+}
+.brand{display:flex; align-items:center; gap:16px}
+.logo{
+  font-size:30px; width:54px; height:54px; display:grid; place-items:center;
+  background:linear-gradient(135deg,var(--accent),var(--accent2)); border-radius:14px;
+  color:#06121a; box-shadow:var(--shadow);
+}
+.brand h1{margin:0; font-size:22px; letter-spacing:3px; font-weight:700}
+.brand h1 span{color:var(--accent); font-weight:400}
+.brand p{margin:2px 0 0; color:var(--muted); font-size:13px}
+.health{display:flex; gap:8px}
+.pill{
+  font-size:12px; padding:6px 12px; border-radius:999px; border:1px solid var(--line);
+  background:var(--panel2); color:var(--muted); white-space:nowrap;
+}
+.pill.ok{color:var(--ok); border-color:rgba(70,209,138,.4)}
+.pill.bad{color:var(--bad); border-color:rgba(255,107,122,.4)}
+
+main{padding:8px clamp(16px,4vw,48px) 48px; max-width:1100px; margin:0 auto; display:flex; flex-direction:column; gap:18px}
+.card{
+  background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+  padding:22px; backdrop-filter:blur(14px); box-shadow:var(--shadow);
+}
+.card h2{margin:0 0 14px; font-size:13px; letter-spacing:1.5px; text-transform:uppercase; color:var(--muted)}
+
+/* dropzone */
+.dropzone{
+  border:2px dashed var(--line); border-radius:14px; padding:34px; text-align:center;
+  transition:.2s; cursor:pointer; background:linear-gradient(180deg,transparent,rgba(90,209,196,.03));
+}
+.dropzone.over{border-color:var(--accent); background:rgba(90,209,196,.09); transform:scale(1.005)}
+.dz-icon{font-size:34px; color:var(--accent)}
+.dz-title{margin:10px 0 4px; font-size:17px; font-weight:600}
+.dz-sub{margin:0; color:var(--muted); font-size:13px}
+.link{background:none; border:none; color:var(--accent2); cursor:pointer; font:inherit; text-decoration:underline; padding:0}
+
+.controls{display:flex; gap:10px; margin-top:16px; flex-wrap:wrap}
+.btn{
+  border:1px solid var(--line); background:var(--panel2); color:var(--text);
+  padding:11px 18px; border-radius:11px; cursor:pointer; font-size:14px; font-weight:600; transition:.15s;
+}
+.btn:hover{border-color:var(--accent); transform:translateY(-1px)}
+.btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#06121a; border:none}
+.btn.ghost{background:transparent; color:var(--muted)}
+.toast{margin-top:12px; min-height:18px; font-size:13px; color:var(--accent)}
+
+/* progress */
+.stage-line{display:flex; justify-content:space-between; align-items:baseline}
+.stage-label{font-size:18px; font-weight:600; text-transform:capitalize}
+.stage-pct{font-size:18px; color:var(--accent); font-variant-numeric:tabular-nums}
+.bar{height:12px; border-radius:999px; background:rgba(8,14,24,.7); overflow:hidden; margin:12px 0 8px; border:1px solid var(--line)}
+.bar-fill{height:100%; width:0%; border-radius:999px; background:linear-gradient(90deg,var(--accent),var(--accent2),var(--accent3)); background-size:200% 100%; transition:width .4s ease; animation:flow 3s linear infinite}
+@keyframes flow{to{background-position:200% 0}}
+.stage-detail{color:var(--muted); font-size:13px; font-variant-numeric:tabular-nums}
+
+.pipeline{display:grid; grid-template-columns:repeat(9,1fr); gap:8px; margin-top:18px}
+.node{
+  text-align:center; padding:10px 6px; border-radius:11px; border:1px solid var(--line);
+  background:var(--panel2); font-size:11px; transition:.2s; position:relative;
+}
+.node .nlabel{color:var(--muted); display:block; line-height:1.3}
+.node .ncount{font-size:16px; font-weight:700; color:var(--text); font-variant-numeric:tabular-nums}
+.node.active{border-color:var(--accent); background:rgba(90,209,196,.14); box-shadow:0 0 0 1px var(--accent) inset}
+.node.active .nlabel{color:var(--accent)}
+.node.done{border-color:rgba(70,209,138,.35)}
+.node.done .ncount{color:var(--ok)}
+@media(max-width:760px){.pipeline{grid-template-columns:repeat(3,1fr)}}
+
+.grid{display:grid; grid-template-columns:1fr 1fr; gap:18px}
+@media(max-width:760px){.grid{grid-template-columns:1fr}}
+.gauge{height:14px; border-radius:999px; background:rgba(8,14,24,.7); overflow:hidden; border:1px solid var(--line)}
+.gauge-fill{height:100%; width:0%; border-radius:999px; background:linear-gradient(90deg,var(--ok),var(--warn)); transition:width .5s}
+.vram-text{margin-top:10px; display:flex; justify-content:space-between; color:var(--muted); font-size:13px}
+#vram-val{color:var(--text); font-weight:600; font-variant-numeric:tabular-nums}
+
+.queue{list-style:none; margin:0; padding:0; max-height:200px; overflow:auto}
+.queue li{display:flex; justify-content:space-between; padding:9px 4px; border-bottom:1px solid var(--line); font-size:13px}
+.queue li:last-child{border:none}
+.queue .qn{color:var(--muted); font-variant-numeric:tabular-nums}
+.muted{color:var(--muted); font-weight:400; font-size:12px}
+.empty{color:var(--muted); font-size:13px; padding:8px 4px}

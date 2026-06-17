@@ -1,0 +1,27 @@
+{
+  "_comment": "The CLIP classifier (stillnorth/classify.py, mirrored from tsn_classify.py) sorts each FLUX image by its CONTENT into A/B/C/D. Each content class is then animated with the Wan 2.2 motion prompt that physically fits that content. Edit the 'motion' strings freely -- they are sent verbatim to the Wan positive-prompt node. Keep them broad, realistic and loopable so one prompt fits every image in its class.",
+
+  "poses": ["Pan Up", "Pan Left", "Pan Right", "Zoom In", "Zoom Out"],
+  "speed_by_pose": {
+    "Pan Up": 0.2, "Pan Left": 0.4, "Pan Right": 0.4, "Zoom In": 0.2, "Zoom Out": 0.3
+  },
+
+  "classes": {
+    "A": {
+      "content": "aerial forest canopy / snowy plains (land only, no open water)",
+      "motion": "Slow low fog and soft cloud shadows drifting horizontally across a vast forest canopy, with fine snow gently falling through the air at varying depths. The treetops stay still while only the mist, shadows and light snow move. Continuous, seamless, perfectly loopable atmospheric motion with no start or end point."
+    },
+    "B": {
+      "content": "mountain ridges, peaks, drifting clouds and mist",
+      "motion": "Clouds and fog rolling slowly and horizontally across a mountain ridge and through the valley at a steady pace, undulating gently while revealing and concealing the terrain beneath. Continuous, seamless and loopable, with no defined leading or trailing edge."
+    },
+    "C": {
+      "content": "rivers, lakes and open liquid water with reflections",
+      "motion": "Calm open water moving gently -- a steady current with visible eddies and subtle surface ripples on a broad river bend, while thin ground mist drifts just above the glass-smooth water reflecting the treeline. Constant, gentle and perfectly loopable, with no beginning or end point."
+    },
+    "D": {
+      "content": "glaciers, frozen lakes, arctic ice and snow-covered ground",
+      "motion": "Heavy snowfall over a frozen arctic landscape seen from an elevated vantage -- individual snowflakes fall diagonally across the frame at varying depths, creating parallax layers as fresh white settles over the ice below. A continuous gentle cascade, fully loopable, with no start or stop."
+    }
+  }
+}

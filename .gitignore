@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# StillNorth runtime artifacts (these live in the ComfyUI output workspace,
+# but ignore them if anyone points the workspace inside the repo)
+forge_state.json
+forge_state.json.tmp
+forge.log
+StillNorthForge/
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

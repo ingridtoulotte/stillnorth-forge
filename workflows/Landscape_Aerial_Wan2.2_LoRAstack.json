@@ -1,0 +1,369 @@
+{
+  "71": {
+    "inputs": {
+      "add_noise": "enable",
+      "noise_seed": 859282998487900,
+      "steps": 4,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "start_at_step": 0,
+      "end_at_step": 2,
+      "return_with_leftover_noise": "enable",
+      "model": [
+        "76",
+        0
+      ],
+      "positive": [
+        "80",
+        0
+      ],
+      "negative": [
+        "80",
+        1
+      ],
+      "latent_image": [
+        "80",
+        2
+      ]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "KSampler (Advanced)"
+    }
+  },
+  "72": {
+    "inputs": {
+      "unet_name": "wan2.2_fun_camera_low_noise_14B_fp8_scaled.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "73": {
+    "inputs": {
+      "filename_prefix": "video/Wan2.2_image_to_video_",
+      "format": "auto",
+      "codec": "auto",
+      "video": [
+        "83",
+        0
+      ]
+    },
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "Save Video"
+    }
+  },
+  "74": {
+    "inputs": {
+      "text": "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
+      "clip": [
+        "85",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Negative Prompt)"
+    }
+  },
+  "75": {
+    "inputs": {
+      "unet_name": "wan2.2_fun_camera_high_noise_14B_fp8_scaled.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "76": {
+    "inputs": {
+      "shift": 8.000000000000002,
+      "model": [
+        "117",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingSD3",
+    "_meta": {
+      "title": "ModelSamplingSD3"
+    }
+  },
+  "77": {
+    "inputs": {
+      "shift": 8,
+      "model": [
+        "120",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingSD3",
+    "_meta": {
+      "title": "ModelSamplingSD3"
+    }
+  },
+  "78": {
+    "inputs": {
+      "add_noise": "disable",
+      "noise_seed": 0,
+      "steps": 4,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "start_at_step": 2,
+      "end_at_step": 4,
+      "return_with_leftover_noise": "disable",
+      "model": [
+        "77",
+        0
+      ],
+      "positive": [
+        "80",
+        0
+      ],
+      "negative": [
+        "80",
+        1
+      ],
+      "latent_image": [
+        "71",
+        0
+      ]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "KSampler (Advanced)"
+    }
+  },
+  "79": {
+    "inputs": {
+      "image": "Capture d'écran 2026-05-28 193453.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "80": {
+    "inputs": {
+      "width": [
+        "87",
+        1
+      ],
+      "height": [
+        "87",
+        2
+      ],
+      "length": [
+        "87",
+        3
+      ],
+      "batch_size": 1,
+      "positive": [
+        "81",
+        0
+      ],
+      "negative": [
+        "74",
+        0
+      ],
+      "vae": [
+        "86",
+        0
+      ],
+      "start_image": [
+        "79",
+        0
+      ],
+      "camera_conditions": [
+        "87",
+        0
+      ]
+    },
+    "class_type": "WanCameraImageToVideo",
+    "_meta": {
+      "title": "WanCameraImageToVideo"
+    }
+  },
+  "81": {
+    "inputs": {
+      "text": "Aerial drone shot slowly pushing forward over a vast wilderness landscape, mountain ridgelines and dense pine forest, low clouds drifting, soft mist in the valleys, warm golden hour light shifting across the terrain, gentle wind moving the trees, subtle parallax, cinematic, highly detailed, photorealistic",
+      "clip": [
+        "85",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Positive Prompt)"
+    }
+  },
+  "82": {
+    "inputs": {
+      "samples": [
+        "78",
+        0
+      ],
+      "vae": [
+        "86",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "83": {
+    "inputs": {
+      "fps": 16,
+      "images": [
+        "82",
+        0
+      ]
+    },
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "Create Video"
+    }
+  },
+  "85": {
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "86": {
+    "inputs": {
+      "vae_name": "wan_2.1_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "87": {
+    "inputs": {
+      "camera_pose": "ClockWise (CW)",
+      "width": 832,
+      "height": 480,
+      "length": 81,
+      "speed": 1,
+      "fx": 0.5,
+      "fy": 0.5,
+      "cx": 0.5,
+      "cy": 0.5
+    },
+    "class_type": "WanCameraEmbedding",
+    "_meta": {
+      "title": "WanCameraEmbedding"
+    }
+  },
+  "88": {
+    "inputs": {
+      "lora_name": "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors",
+      "strength_model": 1,
+      "model": [
+        "75",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA"
+    }
+  },
+  "90": {
+    "inputs": {
+      "lora_name": "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors",
+      "strength_model": 1,
+      "model": [
+        "72",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA"
+    }
+  },
+  "116": {
+    "inputs": {
+      "lora_name": "wan22-light-volumetric-t2v.safetensors",
+      "strength_model": 0.6,
+      "model": [
+        "88",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA"
+    }
+  },
+  "117": {
+    "inputs": {
+      "lora_name": "wan22-upscale-realismboost-t2v-14b.safetensors",
+      "strength_model": 0.5,
+      "model": [
+        "116",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA"
+    }
+  },
+  "118": {
+    "inputs": {
+      "lora_name": "wan22-light-volumetric-t2v.safetensors",
+      "strength_model": 0.6,
+      "model": [
+        "90",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA"
+    }
+  },
+  "119": {
+    "inputs": {
+      "lora_name": "wan22-upscale-realismboost-t2v-14b.safetensors",
+      "strength_model": 0.5,
+      "model": [
+        "118",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA"
+    }
+  },
+  "120": {
+    "inputs": {
+      "lora_name": "wan22-light-cinematicflare-i2v-low.safetensors",
+      "strength_model": 1,
+      "model": [
+        "119",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA"
+    }
+  }
+}
