@@ -72,6 +72,16 @@ def test_config_numbers_sane():
     assert CFG.comfy_prefix("flux", "abc").endswith("/01_flux/abc")
 
 
+def test_nodes_cli_resolves_workflows():
+    """`stillnorth nodes <name>` must accept a bare filename (resolved against
+    workflows/) and return None for a bogus name instead of crashing."""
+    from stillnorth.__main__ import _resolve_workflow
+    for which in ("flux", "wan"):
+        bare = os.path.basename(CFG.workflows[which]["file"])
+        assert _resolve_workflow(bare), f"bare name '{bare}' did not resolve"
+    assert _resolve_workflow("does-not-exist.json") is None
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0
