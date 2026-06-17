@@ -55,15 +55,23 @@ $("file").addEventListener("change", (e) => ingestFiles(e.target.files));
 dz.addEventListener("drop", (e) => ingestFiles(e.dataTransfer.files));
 
 // ---- controls -------------------------------------------------------------
-$("run").addEventListener("click", async () => {
+async function runPipeline() {
   const r = await api("/api/run", {});
   toast(r.started ? "pipeline running" : "already running");
   refresh();
-});
-$("cancel").addEventListener("click", async () => { await api("/api/cancel", {}); toast("cancelling…"); });
+}
+$("run").addEventListener("click", runPipeline);
+$("cancel").addEventListener("click", async () => { await api("/api/cancel", {}); toast("pausing after current item…"); });
 $("clear").addEventListener("click", async () => {
   if (!confirm("Clear the queued prompts? Rendered files are kept on disk.")) return;
   await api("/api/clear", {}); toast("queue cleared"); refresh();
+});
+
+// keyboard shortcuts: R = run/resume, C = cancel (ignored while typing)
+document.addEventListener("keydown", (e) => {
+  if (e.target.matches("input,textarea") || e.metaKey || e.ctrlKey) return;
+  if (e.key === "r" || e.key === "R") { if (!$("run").disabled) runPipeline(); }
+  if (e.key === "c" || e.key === "C") { api("/api/cancel", {}); toast("pausing after current item…"); }
 });
 
 // ---- live status ----------------------------------------------------------
@@ -73,27 +81,79 @@ function setPill(id, ok, label) {
   el.textContent = label + (ok ? " ✓" : " ✕");
 }
 
+function fmtDur(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return m + ":" + String(s).padStart(2, "0");
+}
+
+// run-clock + ETA state (client-side, so it ticks every second even between polls)
+let runStart = 0;        // ms timestamp when the current run began
+let lastCounts = {};     // for the count-bump animation
+
+function elapsedSec() { return runStart ? (Date.now() - runStart) / 1000 : 0; }
+
 async function refresh() {
   let s;
   try { s = await api("/api/status"); } catch { return; }
 
-  $("stage-label").textContent = s.label || "idle";
-  $("stage-pct").textContent = (s.percent || 0) + "%";
-  $("bar-fill").style.width = (s.percent || 0) + "%";
+  // run-clock bookkeeping
+  if (s.running && !runStart) runStart = Date.now();
+  if (!s.running) runStart = 0;
 
-  const det = s.stage_total
-    ? `${s.label} — ${s.stage_done}/${s.stage_total}`
-    : (s.running ? "scanning…" : (s.last_error ? "error: " + s.last_error : "idle"));
+  // stage label + state colouring
+  const labelEl = $("stage-label");
+  labelEl.textContent = s.label || "idle";
+  labelEl.className = "stage-label" +
+    (s.label === "paused" ? " paused" : s.label === "error" ? " error" : s.label === "done" ? " done" : "");
+
+  $("stage-pct").textContent = (s.percent || 0) + "%";
+  const fill = $("bar-fill");
+  fill.style.width = (s.percent || 0) + "%";
+  fill.classList.toggle("idle", !s.running);
+
+  // detail line: prefer the live "rendering x/y…" note, else fall back
+  let det;
+  if (s.note) det = s.note;
+  else if (s.stage_total) det = `${s.label} — ${s.stage_done}/${s.stage_total}`;
+  else if (s.last_error) det = "error: " + s.last_error;
+  else det = s.running ? "scanning…" : "idle";
+  if (s.last_error && s.label === "error") det = "error: " + s.last_error;
   $("stage-detail").textContent = det + (s.totals ? `  ·  ${s.totals.prompts} prompts in set` : "");
 
-  // pipeline node counts + active/done
+  // elapsed timer + rough ETA from completed items this stage
+  if (s.running) {
+    const el = elapsedSec();
+    let txt = "⏱ " + fmtDur(el);
+    if (s.stage_done > 0 && s.stage_total > 0 && s.stage_done < s.stage_total) {
+      const per = el / s.stage_done;
+      txt += " · ~" + fmtDur(per * (s.stage_total - s.stage_done)) + " left (stage)";
+    }
+    $("stage-timer").textContent = txt;
+  } else {
+    $("stage-timer").textContent = "";
+  }
+
+  // pipeline node counts + active/done, with a little bump when a count grows
   const counts = s.counts || {};
   STAGES.forEach(([k]) => {
-    $("c-" + k).textContent = counts[k] ?? 0;
+    const cell = $("c-" + k);
+    const n = counts[k] ?? 0;
+    if (lastCounts[k] !== undefined && n > lastCounts[k]) {
+      cell.classList.remove("bump"); void cell.offsetWidth; cell.classList.add("bump");
+    }
+    lastCounts[k] = n;
+    cell.textContent = n;
     const node = document.querySelector(`.node[data-stage="${k}"]`);
     node.classList.toggle("active", s.stage === k && s.running);
-    node.classList.toggle("done", (counts[k] || 0) > 0 && s.stage !== k);
+    node.classList.toggle("done", n > 0 && s.stage !== k);
   });
+
+  // overall completion = finished masters / prompts in set
+  const masters = counts.final_up || 0;
+  const setn = (s.totals && s.totals.prompts) || 0;
+  $("overall-fill").style.width = (setn ? Math.round(masters / setn * 100) : 0) + "%";
+  $("overall-text").textContent = `${masters} / ${setn}`;
 
   // vram
   if (s.vram) {
@@ -119,6 +179,30 @@ async function refresh() {
   $("run").textContent = s.running ? "● running" : "▶ Run / Resume";
 }
 
+// ---- activity feed (tail of forge.log) ------------------------------------
+function classifyLine(text) {
+  const t = text.toLowerCase();
+  if (/fatal|fail|error|unreachable/.test(t) && !/cancelled/.test(t)) return "bad";
+  if (/cancel|paused|interrupt/.test(t)) return "warn";
+  if (/finished|complete|\+\d+ prompts/.test(t)) return "ok";
+  return "";
+}
+async function refreshLog() {
+  let d;
+  try { d = await api("/api/log"); } catch { return; }
+  const lines = d.lines || [];
+  if (!lines.length) return;
+  const ul = $("log");
+  ul.innerHTML = lines.slice().reverse().map((ln) => {
+    const m = ln.match(/^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\s(.*)$/);
+    const cls = classifyLine(ln);
+    return m
+      ? `<li class="${cls}"><span class="lt">${m[1]}</span>  ${esc(m[2])}</li>`
+      : `<li class="${cls}">${esc(ln)}</li>`;
+  }).join("");
+}
+function esc(s) { return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
 async function health() {
   try {
     const h = await api("/api/health");
@@ -127,6 +211,16 @@ async function health() {
   } catch {}
 }
 
+// tick the elapsed clock every second without hammering the API
+setInterval(() => {
+  if (runStart) {
+    const cur = $("stage-timer").textContent;
+    if (cur.startsWith("⏱")) $("stage-timer").textContent = "⏱ " + fmtDur(elapsedSec()) + cur.replace(/^⏱ [0-9:]+/, "");
+  }
+}, 1000);
+
 health();
 refresh();
+refreshLog();
 setInterval(refresh, 1000);
+setInterval(refreshLog, 2500);

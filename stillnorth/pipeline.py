@@ -62,7 +62,7 @@ class Pipeline:
         self.status = {
             "running": False, "stage": "idle", "label": "idle",
             "percent": 0, "stage_done": 0, "stage_total": 0,
-            "last_error": None,
+            "last_error": None, "note": "", "cancelled": False,
         }
         self._load_state()
 
@@ -140,6 +140,7 @@ class Pipeline:
             if self._thread and self._thread.is_alive():
                 return False
             self.cancel_flag = False
+            self.status.update(cancelled=False, last_error=None, note="starting…")
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
             return True
@@ -148,6 +149,7 @@ class Pipeline:
         """Pause: stop after the current item; rendered files are kept so a
         later Run resumes exactly where it stopped."""
         self.cancel_flag = True
+        self.set_status(cancelled=True, note="finishing current item, then pausing…")
         self.comfy.interrupt()
         self._log("cancel requested")
 
@@ -192,20 +194,27 @@ class Pipeline:
 
     # -- the run loop -------------------------------------------------------
     def _run(self):
-        self.set_status(running=True, last_error=None)
+        self.set_status(running=True, last_error=None, note="scanning for work…")
         self._log("pipeline run started")
         try:
             while not self.cancel_flag:
                 work = self._one_pass()
                 if work == 0:
                     break
-            stage = "idle" if self.cancel_flag else "done"
-            self.set_status(running=False, stage=stage,
-                            label=STAGE_LABELS[stage], percent=100 if stage == "done" else 0)
+            if self.cancel_flag:
+                self.set_status(running=False, stage="idle", label="paused",
+                                percent=0, stage_done=0, stage_total=0,
+                                cancelled=True,
+                                note="paused — press Run to resume where it stopped")
+            else:
+                self.set_status(running=False, stage="done", label="done",
+                                percent=100, stage_done=0, stage_total=0,
+                                cancelled=False, note="all stages complete ✓")
         except Exception as e:
             self._log("FATAL " + repr(e) + "\n" + traceback.format_exc())
-            self.set_status(running=False, stage="idle", label="idle",
-                            last_error=str(e))
+            self.set_status(running=False, stage="idle", label="error",
+                            percent=0, stage_done=0, stage_total=0,
+                            last_error=str(e), note="")
         self._log("pipeline run finished")
 
     def _one_pass(self):
@@ -223,12 +232,23 @@ class Pipeline:
 
     def _begin(self, stage, total):
         self.set_status(stage=stage, label=STAGE_LABELS[stage],
-                        stage_done=0, stage_total=total, percent=0)
+                        stage_done=0, stage_total=total, percent=0,
+                        note=f"0/{total} done — starting…")
+
+    def _working(self, stage, idx, total):
+        """Mark item `idx` (1-based) as in-flight so the UI shows life while a
+        slow FLUX/Wan render is actually running (the bar would otherwise sit
+        frozen at the last completed count for ~45s+ per image)."""
+        pct = round((idx - 1) / total * 100) if total else 0
+        self.set_status(stage=stage, label=STAGE_LABELS[stage],
+                        stage_done=idx - 1, stage_total=total, percent=pct,
+                        note=f"rendering {idx}/{total}…")
 
     def _tick(self, stage, done, total):
         pct = round(done / total * 100) if total else 100
         self.set_status(stage=stage, label=STAGE_LABELS[stage],
-                        stage_done=done, stage_total=total, percent=pct)
+                        stage_done=done, stage_total=total, percent=pct,
+                        note=f"{done}/{total} done")
 
     # -- ComfyUI submit (one item) -----------------------------------------
     def _submit(self, wf, timeout):
@@ -254,6 +274,7 @@ class Pipeline:
         for k, text in todo:
             if self.cancel_flag:
                 break
+            self._working("flux", done + 1, len(todo))
             g = json.loads(json.dumps(base))
             g[wf["node_text"]]["inputs"][wf["field_text"]] = text
             g[wf["node_seed"]]["inputs"][wf["field_seed"]] = random.randint(0, 2**31 - 1)
@@ -278,6 +299,7 @@ class Pipeline:
         for k in todo:
             if self.cancel_flag:
                 break
+            self._working("img_up", done + 1, len(todo))
             src = os.path.join(src_dir, k + ".png")
             dst = os.path.join(out, k + ".png")
             if media.upscale_image(self.cfg, src, dst, self.cfg.img_mult):
@@ -343,6 +365,7 @@ class Pipeline:
         for s in stems:
             if self.cancel_flag:
                 break
+            self._working("vid1", done + 1, len(stems))
             letter = s.split("_", 1)[0]
             pose = random.choice(self.cfg.poses)          # randomized direction
             speed = self.cfg.speed_by_pose[pose]
@@ -367,6 +390,7 @@ class Pipeline:
         for s in stems:
             if self.cancel_flag:
                 break
+            self._working("lastframe", done + 1, len(stems))
             clip = self._clip_path("vid1", s)
             dst = os.path.join(out, s + ".png")
             if clip and media.last_frame(self.cfg, clip, dst):
@@ -389,6 +413,7 @@ class Pipeline:
         for s in stems:
             if self.cancel_flag:
                 break
+            self._working("lf_up", done + 1, len(stems))
             src = os.path.join(src_dir, s + ".png")
             dst = os.path.join(out, s + ".png")
             if media.upscale_image(self.cfg, src, dst, self.cfg.lf_mult):
@@ -412,6 +437,7 @@ class Pipeline:
         for s in stems:
             if self.cancel_flag:
                 break
+            self._working("vid2", done + 1, len(stems))
             pm = self.posemap[s]
             if self._wan_clip(base, wf, src_dir, s, pm["letter"],
                               pm["pose"], pm["speed"], "vid2"):
@@ -432,6 +458,7 @@ class Pipeline:
         for s in stems:
             if self.cancel_flag:
                 break
+            self._working("concat", done + 1, len(stems))
             a = self._clip_path("vid1", s)
             b = self._clip_path("vid2", s)
             dst = os.path.join(out, s + ".mp4")
@@ -455,6 +482,7 @@ class Pipeline:
         for s in stems:
             if self.cancel_flag:
                 break
+            self._working("final_up", done + 1, len(stems))
             src = self._clip_path("concat", s)
             dst = os.path.join(out, s + ".mp4")
             if media.upscale_video(self.cfg, src, dst, self.cfg.final_mult):

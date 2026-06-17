@@ -6,6 +6,7 @@ GET  /                 -> web/index.html
 GET  /<asset>          -> web/<asset>  (css/js)
 GET  /api/status       -> pipeline snapshot + live VRAM + ComfyUI reachability
 GET  /api/health       -> environment check (ComfyUI, ffmpeg)
+GET  /api/log          -> last N lines of forge.log (live activity feed)
 POST /api/ingest       -> {name, html}  add prompts from one HTML payload
 POST /api/run          -> start/resume the worker
 POST /api/cancel       -> pause after current item (resumable)
@@ -22,6 +23,15 @@ from . import media
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 MIME = {".html": "text/html", ".css": "text/css", ".js": "application/javascript",
         ".json": "application/json", ".svg": "image/svg+xml", ".ico": "image/x-icon"}
+
+
+def _tail_log(cfg, n=40):
+    """Return the last `n` lines of forge.log (newest last), or []."""
+    try:
+        with open(cfg.log_path(), "r", encoding="utf-8", errors="replace") as fh:
+            return [ln.rstrip("\n") for ln in fh.readlines()[-n:]]
+    except Exception:
+        return []
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -78,6 +88,8 @@ class Handler(BaseHTTPRequestHandler):
                 "ffmpeg": os.path.exists(cfg.ffmpeg),
                 "workspace": cfg.workspace,
             })
+        if self.path == "/api/log":
+            return self._send(200, {"lines": _tail_log(get_config(), 40)})
         return self._static(self.path)
 
     def do_POST(self):

@@ -44,12 +44,21 @@
   <section class="card progress-card">
     <div class="stage-line">
       <span id="stage-label" class="stage-label">idle</span>
-      <span id="stage-pct" class="stage-pct">0%</span>
+      <span class="stage-right">
+        <span id="stage-timer" class="stage-timer"></span>
+        <span id="stage-pct" class="stage-pct">0%</span>
+      </span>
     </div>
     <div class="bar"><div id="bar-fill" class="bar-fill"></div></div>
     <div id="stage-detail" class="stage-detail">waiting for input</div>
 
     <div class="pipeline" id="pipeline"></div>
+
+    <div class="overall">
+      <span class="overall-label">finished masters</span>
+      <div class="bar thin"><div id="overall-fill" class="bar-fill"></div></div>
+      <span id="overall-text" class="muted">0 / 0</span>
+    </div>
   </section>
 
   <div class="grid">
@@ -64,6 +73,11 @@
       <ul id="queue" class="queue"></ul>
     </section>
   </div>
+
+  <section class="card log-card">
+    <h2>Activity <span class="muted">live · forge.log</span></h2>
+    <ul id="log" class="log"><li class="empty">no activity yet</li></ul>
+  </section>
 </main>
 
 <script src="/app.js"></script>

@@ -107,3 +107,37 @@ main{padding:8px clamp(16px,4vw,48px) 48px; max-width:1100px; margin:0 auto; dis
 .queue .qn{color:var(--muted); font-variant-numeric:tabular-nums}
 .muted{color:var(--muted); font-weight:400; font-size:12px}
 .empty{color:var(--muted); font-size:13px; padding:8px 4px}
+
+/* stage right cluster + elapsed timer */
+.stage-right{display:flex; align-items:baseline; gap:14px}
+.stage-timer{font-size:13px; color:var(--muted); font-variant-numeric:tabular-nums}
+.stage-label.paused{color:var(--warn)}
+.stage-label.error{color:var(--bad)}
+.stage-label.done{color:var(--ok)}
+/* freeze the flowing-gradient animation when nothing is running */
+.bar-fill.idle{animation:none; background-position:0 0}
+
+/* live pulse on the active pipeline node */
+.node.active{animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{
+  0%,100%{box-shadow:0 0 0 1px var(--accent) inset, 0 0 0 0 rgba(90,209,196,.0)}
+  50%{box-shadow:0 0 0 1px var(--accent) inset, 0 0 16px 2px rgba(90,209,196,.35)}
+}
+.node .ncount.bump{animation:bump .4s ease}
+@keyframes bump{0%{transform:scale(1)}40%{transform:scale(1.35);color:var(--accent)}100%{transform:scale(1)}}
+
+/* overall completion strip */
+.overall{display:flex; align-items:center; gap:12px; margin-top:18px; padding-top:14px; border-top:1px solid var(--line)}
+.overall-label{font-size:12px; color:var(--muted); white-space:nowrap; min-width:110px}
+.bar.thin{height:8px; margin:0; flex:1}
+#overall-text{white-space:nowrap; font-variant-numeric:tabular-nums}
+
+/* activity feed */
+.log-card h2{display:flex; gap:8px; align-items:baseline}
+.log{list-style:none; margin:0; padding:0; max-height:220px; overflow:auto;
+     font-family:"Cascadia Code",Consolas,monospace; font-size:12px}
+.log li{padding:4px 6px; border-bottom:1px solid rgba(120,160,210,.07);
+        color:var(--muted); white-space:pre-wrap; word-break:break-word; line-height:1.5}
+.log li:last-child{border:none}
+.log li .lt{color:#5a6b85}
+.log li.warn{color:var(--warn)} .log li.bad{color:var(--bad)} .log li.ok{color:var(--ok)}
