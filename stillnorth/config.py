@@ -68,8 +68,13 @@ class Config:
         # native_long: render the whole ~10s clip in ONE Wan pass instead of
         # clip1 + a softer continuation clip2. No seam, no quality step -- the
         # proven "11s natif" fix. Falls back to continuation if disabled.
-        self.native_long = bool(self.raw.get("native_long", True))
+        self.native_long = bool(self.raw.get("native_long", False))
         self.native_frames = int(self.raw.get("native_long_frames", 161))
+        # continuation polish: drop the first few frames of clip 1 (img2vid
+        # start glitch) and sharpen clip 2 to match clip 1 (the continuation
+        # clip drifts slightly soft). Empty clip2_sharpen disables sharpening.
+        self.trim_start = max(0, int(self.raw.get("trim_start_frames", 3)))
+        self.clip2_sharpen = str(self.raw.get("clip2_sharpen", "")).strip()
         self.fps = int(self.raw["fps"])
         self.cq = int(self.raw["video_cq"])
         self.nvenc = bool(self.raw["nvenc"])

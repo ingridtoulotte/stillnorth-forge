@@ -88,10 +88,21 @@ def last_frame(cfg, clip, dst):
 
 
 def concat_pair(cfg, a, b, dst):
-    """Join clip a + clip b. b's frame 0 == a's last frame (b was generated
-    from it), so drop b frame 0 to avoid a 1-frame freeze at the seam."""
-    fc = ("[1:v]trim=start_frame=1,setpts=N/FRAME_RATE/TB[b];"
-          "[0:v][b]concat=n=2:v=1[o]")
+    """Join clip a + clip b into the ~10s master.
+
+    - clip a: drop the first `trim_start` frames (the img2vid start glitch).
+    - clip b: drop frame 0 (it == a's last frame, b was generated from it) and
+      sharpen to match a -- the continuation clip drifts slightly soft, so a
+      light unsharp brings its detail back up to clip 1's level.
+    """
+    n = max(0, int(getattr(cfg, "trim_start", 0)))
+    a_chain = f"[0:v]trim=start_frame={n},setpts=N/FRAME_RATE/TB[a]" if n > 0 \
+        else "[0:v]setpts=N/FRAME_RATE/TB[a]"
+    b_chain = "[1:v]trim=start_frame=1,setpts=N/FRAME_RATE/TB"
+    if getattr(cfg, "clip2_sharpen", ""):
+        b_chain += f",unsharp={cfg.clip2_sharpen}"
+    b_chain += "[b]"
+    fc = f"{a_chain};{b_chain};[a][b]concat=n=2:v=1[o]"
     return _run([cfg.ffmpeg, "-y", "-loglevel", "error", "-i", a, "-i", b,
                  "-filter_complex", fc, "-map", "[o]", "-r", str(cfg.fps)]
                 + _codec_args(cfg) + [dst]) and os.path.exists(dst)

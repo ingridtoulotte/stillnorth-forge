@@ -38,9 +38,13 @@ A zero-shot **CLIP** classifier (mirrored from the project's `tsn_classify.py`, 
 
 All four are broad, realistic and loopable so a single prompt fits every image in its class. Edit them freely in **`config/motion_prompts.json`** — they are sent verbatim.
 
-**One native ~10 s clip (default).** Each master is rendered as a **single native Wan pass** (`native_long: true`, `native_long_frames: 161` ≈ 10 s @ 16 fps). This is the proven "11 s natif" recipe: because there is no second clip, there is **no seam and no quality step** — sharpness is uniform end-to-end (measured clip-start vs clip-end variance-of-Laplacian ratio ≈ 1.00, vs ≈ 0.67 for the old two-clip continuation, where clip 2 came out visibly softer). Fits a 16 GB card.
+**Two-clip continuation (default), tuned to be seamless.** Clip 1 picks a random camera move (`Pan Up/Left/Right`, `Zoom In/Out`); the continuation clip starts from clip 1's last frame, **forced to the same camera move + speed**, so motion stays consistent across the join. The two are concatenated (clip 2's duplicate first frame dropped). Three fixes make the seam invisible:
 
-**Continuation fallback.** Set `native_long: false` to fall back to the two-clip method: clip 1 picks a random camera move (`Pan Up/Left/Right`, `Zoom In/Out`); the continuation clip starts from clip 1's last frame, **forced to the same camera move + speed**, and the two are concatenated (clip 2's duplicate first frame dropped). In this mode `continuation_seed: native` (default) feeds Wan the crisp **native** last frame rather than the ×4-lanczos one — the upscale only round-trips a blur since Wan resizes the seed back to 832×480 anyway.
+- `continuation_seed: native` (default) — seed clip 2 from the crisp **native** 832×480 last frame, not the ×4-lanczos one (Wan resizes the seed back to 832×480 anyway, so the upscale only round-trips a blur).
+- `clip2_sharpen` — a light unsharp on clip 2 only, because a video model continuing from a single still drifts slightly soft. Tuned so clip 2's detail matches clip 1 (measured clip-start vs clip-end variance-of-Laplacian ratio ≈ **1.01**, up from ≈ 0.36 unsharpened on the final master).
+- `trim_start_frames` (default 3) — drop the img2vid start glitch at the head of clip 1.
+
+> **Why not one long native pass?** This Wan **WanCameraEmbedding** workflow only animates ~81 frames (5 s). Forcing `length: 161` makes the camera move die out (or, for a zoom, ease back) after the first 5 s — the clip looks like it stalls/reverses at the midpoint. So `native_long` exists as a config toggle but defaults **false**; only enable it with a workflow that genuinely supports long native generation (e.g. a fun_camera long-length export).
 
 ---
 

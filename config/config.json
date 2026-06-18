@@ -19,8 +19,10 @@
   "final_upscale_mult": 4,
 
   "continuation_seed": "native",
-  "native_long": true,
+  "native_long": false,
   "native_long_frames": 161,
+  "trim_start_frames": 3,
+  "clip2_sharpen": "5:5:1.4:5:5:0.0",
 
   "fps": 16,
   "video_cq": 19,
