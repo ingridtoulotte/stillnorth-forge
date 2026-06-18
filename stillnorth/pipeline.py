@@ -59,6 +59,7 @@ class Pipeline:
         self.prompts = {}    # key -> {text, src, title}
         self.letters = {}    # key -> "A".."D"
         self.posemap = {}    # stem(<letter>_<key>) -> {letter, pose, speed}
+        self.metrics = {}    # stage -> {n, fail, t, min, max}  (per-stage timing)
         self.status = {
             "running": False, "stage": "idle", "label": "idle",
             "percent": 0, "stage_done": 0, "stage_total": 0,
@@ -75,15 +76,18 @@ class Pipeline:
                 self.prompts = d.get("prompts", {})
                 self.letters = d.get("letters", {})
                 self.posemap = d.get("posemap", {})
+                self.metrics = d.get("metrics", {})
             except Exception:
                 pass
 
     def _save_state(self):
+        """Atomic write: serialise to a temp file then os.replace() so a crash
+        mid-write can never leave a half-written (corrupt) state file."""
         p = self.cfg.state_path()
         tmp = p + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({"prompts": self.prompts, "letters": self.letters,
-                       "posemap": self.posemap}, fh, indent=1)
+                       "posemap": self.posemap, "metrics": self.metrics}, fh, indent=1)
         os.replace(tmp, p)
 
     def _log(self, msg):
@@ -126,7 +130,32 @@ class Pipeline:
             st["counts"] = {s: self._count(s) for s in PROCESS}
             st["queue"] = self._queue_view()
             st["cancel"] = self.cancel_flag
+            st["metrics"] = self._metrics_view()
         return st
+
+    def _metrics_view(self):
+        out = {}
+        for stage, m in self.metrics.items():
+            n = m.get("n", 0)
+            out[stage] = {
+                "n": n, "fail": m.get("fail", 0),
+                "avg": round(m["t"] / n, 1) if n else None,
+                "min": round(m["min"], 1) if m.get("min") is not None else None,
+                "max": round(m["max"], 1) if m.get("max") is not None else None,
+            }
+        return out
+
+    def _record(self, stage, dt, ok):
+        """Accumulate per-stage timing + failure counts (for the metrics UI)."""
+        m = self.metrics.setdefault(
+            stage, {"n": 0, "fail": 0, "t": 0.0, "min": None, "max": None})
+        if ok:
+            m["n"] += 1
+            m["t"] += dt
+            m["min"] = dt if m["min"] is None else min(m["min"], dt)
+            m["max"] = dt if m["max"] is None else max(m["max"], dt)
+        else:
+            m["fail"] += 1
 
     def _queue_view(self):
         by_src = {}
@@ -187,6 +216,7 @@ class Pipeline:
             self.prompts = {}
             self.letters = {}
             self.posemap = {}
+            self.metrics = {}
             try:
                 sp = self.cfg.state_path()
                 if os.path.exists(sp):
@@ -285,14 +315,55 @@ class Pipeline:
                         stage_done=done, stage_total=total, percent=pct,
                         note=f"{done}/{total} done")
 
-    # -- ComfyUI submit (one item) -----------------------------------------
-    def _submit(self, wf, timeout):
-        try:
-            pid = self.comfy.queue(wf)
-        except Exception as e:
-            self.set_status(last_error=f"ComfyUI unreachable: {e}")
-            return False, "queue failed"
-        return self.comfy.wait(pid, timeout, cancel=lambda: self.cancel_flag)
+    # -- ComfyUI submit (one item, with retry + backoff + metrics) ----------
+    @staticmethod
+    def _categorize(msg):
+        """Map a raw failure into a coarse category so the UI/log can tell an
+        offline-ComfyUI apart from a workflow/GPU/codec problem."""
+        m = (msg or "").lower()
+        if "unreach" in m or "urlerror" in m or "refused" in m or "connection" in m:
+            return "comfy offline"
+        if "timeout" in m:
+            return "render timeout (GPU/slow)"
+        if "comfy error" in m or "workflow" in m or "node" in m:
+            return "workflow error"
+        if "no output" in m:
+            return "no output (workflow)"
+        return msg or "unknown"
+
+    def _backoff(self, attempt):
+        """Sleep retry_backoff * 2**attempt (capped 60s), but wake early on cancel."""
+        delay = min(self.cfg.retry_backoff * (2 ** attempt), 60.0)
+        end = time.time() + delay
+        while time.time() < end and not self.cancel_flag:
+            time.sleep(0.25)
+
+    def _submit(self, wf, timeout, stage):
+        attempts = self.cfg.submit_retries + 1
+        t0 = time.time()
+        last = "queue failed"
+        for a in range(attempts):
+            if self.cancel_flag:
+                return False, "cancelled"
+            try:
+                pid = self.comfy.queue(wf)
+            except Exception as e:
+                last = self._categorize(repr(e))
+                self.set_status(last_error=f"ComfyUI: {last}")
+                self._log(f"{stage} submit error (try {a + 1}/{attempts}): {last}")
+                self._backoff(a)
+                continue
+            ok, msg = self.comfy.wait(pid, timeout, cancel=lambda: self.cancel_flag)
+            if ok:
+                self._record(stage, time.time() - t0, True)
+                return True, msg
+            if msg == "cancelled":
+                return False, "cancelled"
+            last = self._categorize(msg)
+            self._log(f"{stage} render failed (try {a + 1}/{attempts}): {last}")
+            self._backoff(a)
+        self._record(stage, time.time() - t0, False)
+        return False, last
 
     # ---- STAGE 1: FLUX images --------------------------------------------
     def _stage_flux(self):
@@ -314,7 +385,7 @@ class Pipeline:
             g[wf["node_text"]]["inputs"][wf["field_text"]] = text
             g[wf["node_seed"]]["inputs"][wf["field_seed"]] = random.randint(0, 2**31 - 1)
             g[wf["node_save"]]["inputs"][wf["field_save"]] = self.cfg.comfy_prefix("flux", k)
-            ok, msg = self._submit(g, self.cfg.timeout_img)
+            ok, msg = self._submit(g, self.cfg.timeout_img, "flux")
             if ok and comfymod.rename_out(out, k, (".png",)):
                 done += 1
             else:
@@ -544,7 +615,7 @@ class Pipeline:
         g[wf["node_camera"]]["inputs"][wf["field_speed"]] = speed
         g[wf["node_seed"]]["inputs"][wf["field_seed"]] = random.randint(0, 2**31 - 1)
         g[wf["node_save"]]["inputs"][wf["field_save"]] = self.cfg.comfy_prefix(out_stage, stem)
-        ok, msg = self._submit(g, self.cfg.timeout_vid)
+        ok, msg = self._submit(g, self.cfg.timeout_vid, out_stage)
         try:
             os.remove(staged)
         except OSError:

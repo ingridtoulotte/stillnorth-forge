@@ -11,6 +11,8 @@
   "render_timeout_img": 600,
   "render_timeout_vid": 1200,
   "poll_seconds": 2,
+  "submit_retries": 2,
+  "retry_backoff_seconds": 5,
 
   "image_upscale_mult": 2,
   "lastframe_upscale_mult": 4,

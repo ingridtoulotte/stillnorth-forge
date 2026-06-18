@@ -54,6 +54,8 @@ class Config:
         self.timeout_img = int(self.raw["render_timeout_img"])
         self.timeout_vid = int(self.raw["render_timeout_vid"])
         self.poll = float(self.raw["poll_seconds"])
+        self.submit_retries = int(self.raw.get("submit_retries", 2))
+        self.retry_backoff = float(self.raw.get("retry_backoff_seconds", 5))
 
         self.img_mult = int(self.raw["image_upscale_mult"])
         self.lf_mult = int(self.raw["lastframe_upscale_mult"])

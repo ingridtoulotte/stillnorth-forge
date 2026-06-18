@@ -25,3 +25,5 @@ jobs:
         run: python tests/test_extract.py
       - name: Validate config + workflow node maps
         run: python tests/test_config.py
+      - name: Server + robustness tests (sandbox, outputs, retry)
+        run: python tests/test_server.py

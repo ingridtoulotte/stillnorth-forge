@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -14,10 +14,11 @@
   <aside class="sidebar" id="sidebar">
     <div class="brand">
       <span class="logo">❄</span>
-      <div>
+      <div class="brand-txt">
         <h1>STILL NORTH</h1>
         <p class="brand-sub">· FORGE</p>
       </div>
+      <button id="theme" class="mini-btn theme-btn" title="toggle theme (T)" aria-label="toggle light/dark theme">◐</button>
     </div>
 
     <nav class="side-nav">
@@ -25,6 +26,7 @@
       <a href="#sec-progress" class="nav-item">▤ <span>Progress</span></a>
       <a href="#sec-queue" class="nav-item">☰ <span>Queue</span></a>
       <a href="#sec-activity" class="nav-item">⎙ <span>Activity</span></a>
+      <a href="#sec-gallery" class="nav-item">▦ <span>Outputs</span></a>
     </nav>
 
     <div class="side-block">
@@ -34,6 +36,7 @@
       <div class="stat"><span>Elapsed</span><b id="stat-elapsed">—</b></div>
       <div class="stat"><span>Avg / item</span><b id="stat-avg">—</b></div>
       <div class="stat"><span>Stage ETA</span><b id="stat-eta">—</b></div>
+      <div class="stat"><span>Failures</span><b id="stat-fails">0</b></div>
     </div>
 
     <div class="side-block">
@@ -59,7 +62,7 @@
       </div>
     </div>
 
-    <div class="side-foot">R run · C cancel · keys</div>
+    <button class="side-foot" id="open-palette">⌘K · command palette</button>
   </aside>
 
   <!-- ===================== MAIN CONTENT ===================== -->
@@ -105,15 +108,47 @@
     <div class="grid">
       <section class="card queue-card" id="sec-queue">
         <h2>Queue <span id="queue-total" class="muted"></span></h2>
+        <input id="queue-search" class="search" type="search" placeholder="filter files…" aria-label="filter queue" />
         <ul id="queue" class="queue"></ul>
       </section>
 
       <section class="card log-card" id="sec-activity">
-        <h2>Activity <span class="muted">live · forge.log</span></h2>
+        <h2>Activity
+          <span class="log-tools">
+            <input id="log-search" class="search" type="search" placeholder="filter…" aria-label="filter activity log" />
+            <button id="log-pause" class="mini-btn" title="pause autoscroll">⏸</button>
+            <button id="log-copy" class="mini-btn" title="copy log">⧉</button>
+          </span>
+        </h2>
         <ul id="log" class="log"><li class="empty">no activity yet</li></ul>
       </section>
     </div>
+
+    <section class="card gallery-card" id="sec-gallery">
+      <h2>Outputs
+        <span class="gal-tools">
+          <span id="gal-tabs" class="gal-tabs"></span>
+          <button id="gal-refresh" class="mini-btn" title="refresh">⟳</button>
+        </span>
+      </h2>
+      <div id="gallery" class="gallery"><div class="empty">no outputs yet — run a batch</div></div>
+    </section>
   </main>
+</div>
+
+<!-- command palette -->
+<div id="palette" class="overlay" hidden>
+  <div class="palette" role="dialog" aria-modal="true" aria-label="command palette">
+    <input id="palette-input" class="palette-input" type="text" placeholder="type a command…" autocomplete="off" />
+    <ul id="palette-list" class="palette-list"></ul>
+  </div>
+</div>
+
+<!-- media lightbox -->
+<div id="lightbox" class="overlay" hidden>
+  <button id="lb-close" class="lb-close" aria-label="close">✕</button>
+  <div id="lb-body" class="lb-body"></div>
+  <div id="lb-caption" class="lb-caption"></div>
 </div>
 
 <script src="/app.js"></script>

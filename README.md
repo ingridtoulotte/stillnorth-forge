@@ -73,8 +73,12 @@ python -m stillnorth nodes workflows\image_flux2_text_to_image.json   # find nod
 
 - **Drag-and-drop zone** — one or many `.html` files; add more anytime.
 - **Run / Resume** (`R`), **Cancel** (`C`; pause, resumable), **Clear queue** (forget pending prompts, **keep** rendered media), **Purge outputs** (destructive — **delete** every rendered image/clip and reset to a clean slate).
-- **Left sidebar** — live stats (prompts in set, finished masters, elapsed, avg/item, stage ETA), VRAM gauge, the output-folder path (with copy), and the environment health pills.
-- **Activity feed** — a live colour-coded tail of `forge.log`.
+- **Left sidebar** — live stats (prompts in set, finished masters, elapsed, avg/item, stage ETA, failures), VRAM gauge, the output-folder path (with copy), and the environment health pills.
+- **Output gallery** — browse every rendered stage in-app (thumbnails for images, click-to-play loop preview for clips), copy any file's absolute path, lightbox view. Served sandboxed to the workspace with HTTP-range seeking.
+- **Per-stage metrics** — each pipeline node shows its average render time and failure count.
+- **Activity feed** — live colour-coded tail of `forge.log` with search, copy, and pause-autoscroll.
+- **Command palette** (`⌘K` / `Ctrl-K`) and shortcuts: `R` run, `C` cancel, `T` theme, `G` gallery.
+- **Light / dark theme** toggle (persisted), built on a semantic design-token system.
 - **Live GPU VRAM** gauge (via `nvidia-smi`).
 - **Progress bar + stage text** that reports exactly where you are: `image batch 42%`, `upscaling the flux images 80%`, `1st vid batch …`, `upscaling the lastframes (1st vid) …`, `2nd vid batch …`, `final upscale …`.
 - **Pipeline strip** showing the live output count at every one of the 9 stages, with the active stage highlighted.
@@ -84,7 +88,7 @@ python -m stillnorth nodes workflows\image_flux2_text_to_image.json   # find nod
 
 Everything tunable lives in `config/` — no Python edits needed.
 
-- **`config/config.json`** — ComfyUI address, ffmpeg path, ComfyUI input/output dirs, server host/port, upscale multipliers (`2` / `4` / `4`), fps, codec/quality, the Route-1 upscale filter chain, timeouts.
+- **`config/config.json`** — ComfyUI address, ffmpeg path, ComfyUI input/output dirs, server host/port, upscale multipliers (`2` / `4` / `4`), fps, codec/quality, the Route-1 upscale filter chain, timeouts, and `submit_retries` / `retry_backoff_seconds` (each ComfyUI render is retried with exponential backoff before it's marked failed; failures are categorised — offline / workflow / GPU-timeout — in the log and status).
 - **`config/workflows.json`** — the node-id map into each workflow. Re-exported a workflow and the ids changed? Run `python -m stillnorth nodes <file>` and fix them here.
 - **`config/motion_prompts.json`** — the 4 motion prompts, the camera poses and per-pose speed.
 

@@ -7,6 +7,8 @@ GET  /<asset>          -> web/<asset>  (css/js)
 GET  /api/status       -> pipeline snapshot + live VRAM + ComfyUI reachability
 GET  /api/health       -> environment check (ComfyUI, ffmpeg)
 GET  /api/log          -> last N lines of forge.log (live activity feed)
+GET  /api/outputs      -> rendered files per stage (name/size/mtime/kind)
+GET  /api/file?path=   -> stream a rendered file (sandboxed to the workspace)
 POST /api/ingest       -> {name, html}  add prompts from one HTML payload
 POST /api/run          -> start/resume the worker
 POST /api/cancel       -> pause after current item (resumable)
@@ -15,15 +17,20 @@ POST /api/purge        -> DESTRUCTIVE: delete all rendered output + reset state
 """
 import json
 import os
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .config import get_config
+from .config import get_config, STAGE_DIRS
 from .pipeline import get_pipeline
 from . import media
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 MIME = {".html": "text/html", ".css": "text/css", ".js": "application/javascript",
         ".json": "application/json", ".svg": "image/svg+xml", ".ico": "image/x-icon"}
+MEDIA_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+              ".webp": "image/webp", ".mp4": "video/mp4", ".webm": "video/webm"}
+IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+VID_EXTS = (".mp4", ".webm")
 
 
 def _tail_log(cfg, n=40):
@@ -33,6 +40,45 @@ def _tail_log(cfg, n=40):
             return [ln.rstrip("\n") for ln in fh.readlines()[-n:]]
     except Exception:
         return []
+
+
+def _list_outputs(cfg, limit=300):
+    """Per-stage listing of rendered media (newest first)."""
+    out = {}
+    for key, folder in STAGE_DIRS.items():
+        d = os.path.join(cfg.workspace, folder)
+        files = []
+        if os.path.isdir(d):
+            for f in os.listdir(d):
+                p = os.path.join(d, f)
+                ext = os.path.splitext(f)[1].lower()
+                kind = "image" if ext in IMG_EXTS else "video" if ext in VID_EXTS else None
+                if kind is None or not os.path.isfile(p):
+                    continue
+                try:
+                    stt = os.stat(p)
+                except OSError:
+                    continue
+                files.append({"name": f, "rel": folder + "/" + f, "size": stt.st_size,
+                              "mtime": int(stt.st_mtime), "kind": kind})
+            files.sort(key=lambda e: e["mtime"], reverse=True)
+        out[key] = {"folder": folder, "files": files[:limit], "total": len(files)}
+    return out
+
+
+def _safe_workspace_path(cfg, rel):
+    """Resolve `rel` under the workspace and refuse anything that escapes it.
+
+    realpath collapses `..` and symlinks, so a request like `../../secret` or an
+    absolute path can never read outside the rendered-output workspace.
+    """
+    if not rel:
+        return None
+    base = os.path.realpath(cfg.workspace)
+    full = os.path.realpath(os.path.join(base, rel))
+    if full != base and not full.startswith(base + os.sep):
+        return None
+    return full if os.path.isfile(full) else None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -71,6 +117,43 @@ class Handler(BaseHTTPRequestHandler):
         with open(full, "rb") as fh:
             self._send(200, fh.read(), MIME.get(ext, "application/octet-stream"))
 
+    def _serve_media(self, full):
+        """Stream a media file with the right MIME and HTTP Range support so
+        the in-app gallery can seek inside clips."""
+        ext = os.path.splitext(full)[1].lower()
+        ctype = MEDIA_MIME.get(ext, "application/octet-stream")
+        size = os.path.getsize(full)
+        rng = self.headers.get("Range", "")
+        if rng.startswith("bytes="):
+            try:
+                s, e = rng[6:].split("-", 1)
+                start = int(s) if s else 0
+                end = int(e) if e else size - 1
+                end = min(end, size - 1)
+                if start > end:
+                    raise ValueError
+                with open(full, "rb") as fh:
+                    fh.seek(start)
+                    data = fh.read(end - start + 1)
+                self.send_response(206)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            except Exception:
+                pass
+        with open(full, "rb") as fh:
+            data = fh.read()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(size))
+        self.send_header("Accept-Ranges", "bytes")
+        self.end_headers()
+        self.wfile.write(data)
+
     # -- routes -------------------------------------------------------------
     def do_GET(self):
         pipe = get_pipeline()
@@ -91,6 +174,14 @@ class Handler(BaseHTTPRequestHandler):
             })
         if self.path == "/api/log":
             return self._send(200, {"lines": _tail_log(get_config(), 40)})
+        if self.path == "/api/outputs":
+            return self._send(200, _list_outputs(get_config()))
+        if self.path.startswith("/api/file?"):
+            rel = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("path", [""])[0]
+            full = _safe_workspace_path(get_config(), rel)
+            if not full:
+                return self._send(404, {"error": "not found or outside workspace"})
+            return self._serve_media(full)
         return self._static(self.path)
 
     def do_POST(self):
