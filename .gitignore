@@ -11,6 +11,11 @@ forge_state.json
 forge_state.json.tmp
 forge.log
 StillNorthForge/
+assembler_state.json
+assembler_state.json.tmp
+_assembler_cache/
+Compilations/
+11sec_used_*/
 
 # editors / OS
 .vscode/

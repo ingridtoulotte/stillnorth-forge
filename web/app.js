@@ -154,8 +154,11 @@ async function refresh() {
     $("m-" + k).textContent = m && m.avg != null ? `~${fmtDur(m.avg)}${m.fail ? " · " + m.fail + "✕" : ""}` : "";
   });
 
-  const masters = counts.final_up || 0, setn = (s.totals && s.totals.prompts) || 0;
-  $("overall-fill").style.width = (setn ? Math.round(masters / setn * 100) : 0) + "%";
+  // finished masters = everything in the library (09_final_up4 + used buckets),
+  // not just what is still sitting in final_up before the assembler moves it
+  const masters = (s.library && s.library.total != null) ? s.library.total : (counts.final_up || 0);
+  const setn = (s.totals && s.totals.prompts) || 0;
+  $("overall-fill").style.width = (setn ? Math.round(Math.min(masters, setn) / setn * 100) : 0) + "%";
   $("overall-text").textContent = `${masters} / ${setn}`;
   $("stat-prompts").textContent = setn; $("stat-masters").textContent = masters; $("stat-fails").textContent = fails;
 
@@ -274,6 +277,10 @@ const COMMANDS = [
   { name: "Purge outputs (delete all)", keys: "", run: purgeOutputs },
   { name: "Toggle light / dark theme", keys: "T", run: toggleTheme },
   { name: "Refresh output gallery", keys: "G", run: loadGallery },
+  { name: "Build long video (compilation)", keys: "", run: () => { location.hash = "#sec-assembler"; buildLong(); } },
+  { name: "Stop long-video build", keys: "", run: cancelLong },
+  { name: "Clean aged intermediates now", keys: "", run: cleanupNow },
+  { name: "Jump: Long video assembler", keys: "", run: () => location.hash = "#sec-assembler" },
   { name: "Copy output folder path", keys: "", run: () => navigator.clipboard.writeText(wsPath).then(() => toast("path copied")) },
   { name: "Copy activity log", keys: "", run: () => navigator.clipboard.writeText(logLines.join("\n")).then(() => toast("log copied")) },
   { name: "Jump: Input", keys: "", run: () => location.hash = "#sec-input" },
@@ -321,6 +328,133 @@ document.addEventListener("keydown", (e) => {
   else if (k === "g") { loadGallery(); location.hash = "#sec-gallery"; }
 });
 
+// ---- preview ("last done only") -------------------------------------------
+let prevRel = "";
+async function refreshPreview() {
+  let d; try { d = await api("/api/preview"); } catch { return; }
+  const last = d.last, box = $("preview");
+  if (!last) { if (prevRel) { box.innerHTML = `<div class="empty">nothing rendered yet</div>`; prevRel = ""; } $("prev-meta").textContent = ""; return; }
+  $("prev-meta").textContent = `· ${STAGE_LABEL[last.stage] || last.stage}`;
+  if (last.rel === prevRel) return;       // unchanged — don't reload the media
+  prevRel = last.rel;
+  const src = "/api/file?path=" + encodeURIComponent(last.rel);
+  const m = last.kind === "video"
+    ? `<video src="${src}" controls autoplay loop muted playsinline></video>`
+    : `<img src="${src}" alt="${esc(last.name)}" />`;
+  box.innerHTML = `${m}<div class="prev-cap">${esc(last.name)}</div>`;
+}
+
+// ---- long-video assembler -------------------------------------------------
+const DUR_LABEL = { "15min": "15 min", "30min": "30 min", "1h": "1 hour", "2h": "2 h", "3h": "3 h", "4h": "4 h", "6h": "6 h", "8h": "8 h", "10h": "10 h", "12h": "12 h" };
+const BUCKET_LABEL = ["Never used", "Used 1×", "Used 2×", "Used 3×", "Used 4×+"];
+let asmDur = localStorage.getItem("snf-asm-dur") || "1h";
+let asmWeights = null, asmDursBuilt = false, asmBusy = false;
+
+function renderDurations(durs) {
+  if (asmDursBuilt) return;
+  $("asm-durations").innerHTML = durs.map((d) =>
+    `<button class="dur-btn" data-key="${d.key}">${DUR_LABEL[d.key] || d.key}</button>`).join("");
+  $("asm-durations").addEventListener("click", (e) => {
+    const b = e.target.closest(".dur-btn"); if (!b) return;
+    asmDur = b.dataset.key; localStorage.setItem("snf-asm-dur", asmDur); markDuration();
+  });
+  asmDursBuilt = true;
+}
+function markDuration() {
+  $("asm-durations").querySelectorAll(".dur-btn").forEach((b) => b.classList.toggle("sel", b.dataset.key === asmDur));
+}
+
+function renderWeights(buckets) {
+  const w = asmWeights || {};
+  $("asm-weights").innerHTML = [0, 1, 2, 3, 4].map((lvl) => {
+    const have = (buckets && buckets[lvl]) || 0;
+    const pct = Math.round(+w[lvl] || 0);
+    return `<div class="wrow">
+      <span class="wlabel">${BUCKET_LABEL[lvl]}<span class="whave">${have} clip${have === 1 ? "" : "s"}</span></span>
+      <span class="wctl">
+        <button class="mini-btn wdec" data-lvl="${lvl}" title="less">◀</button>
+        <span class="wval" id="wval-${lvl}">${pct}%</span>
+        <button class="mini-btn winc" data-lvl="${lvl}" title="more">▶</button>
+      </span>
+    </div>`;
+  }).join("");
+}
+function normalizeWeights() {
+  const t = [0, 1, 2, 3, 4].reduce((a, l) => a + (+asmWeights[l] || 0), 0);
+  if (t <= 0) { asmWeights = { 0: 100, 1: 0, 2: 0, 3: 0, 4: 0 }; return; }
+  [0, 1, 2, 3, 4].forEach((l) => { asmWeights[l] = Math.round((+asmWeights[l] || 0) / t * 100); });
+}
+$("asm-weights").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b || !asmWeights) return;
+  const lvl = +b.dataset.lvl;
+  const step = b.classList.contains("winc") ? 5 : -5;
+  asmWeights[lvl] = Math.max(0, (+asmWeights[lvl] || 0) + step);
+  normalizeWeights();
+  [0, 1, 2, 3, 4].forEach((l) => { const el = $("wval-" + l); if (el) el.textContent = Math.round(+asmWeights[l] || 0) + "%"; });
+  clearTimeout(saveWeights._t);
+  saveWeights._t = setTimeout(saveWeights, 600);
+});
+async function saveWeights() { try { await api("/api/weights", { weights: asmWeights }); } catch {} }
+
+function renderCompilations(list) {
+  const ul = $("asm-comp-list");
+  if (!list || !list.length) { ul.innerHTML = `<li class="empty">none yet — build one above</li>`; return; }
+  ul.innerHTML = list.map((c) =>
+    `<li><span class="cname" title="${esc(c.path)}">${esc(c.name)}</span>
+       <span class="cmeta">${fmtSize(c.size)}</span>
+       <button class="mini-btn ccopy" data-path="${esc(c.path)}" title="copy path">⧉</button></li>`).join("");
+}
+$("asm-comp-list").addEventListener("click", (e) => {
+  const b = e.target.closest(".ccopy"); if (!b) return;
+  navigator.clipboard.writeText(b.dataset.path).then(() => toast("path copied"), () => toast(b.dataset.path));
+});
+
+async function loadAssembler() {
+  let d; try { d = await api("/api/library"); } catch { return; }
+  renderDurations(d.durations || []); markDuration();
+  if (asmWeights === null) {
+    const w = d.weights || {}; asmWeights = {};
+    [0, 1, 2, 3, 4].forEach((l) => { asmWeights[l] = +w[l] != null ? +w[l] : (+w[String(l)] || 0); });
+    normalizeWeights();
+  }
+  renderWeights(d.buckets);
+  renderCompilations(d.compilations);
+  const b = d.buckets || {};
+  $("asm-libtotal").textContent = b.total != null ? `· ${b.total} masters available` : "";
+  $("asm-retention-text").innerHTML = d.autodelete
+    ? `Intermediate FLUX images, first clips, last frames & concats are auto-deleted <b>${d.retention_days} days</b> after a master is first used in a long video. Finished masters are always kept.`
+    : `Auto-clean is <b>off</b>. Use the button to prune aged intermediates on demand.`;
+
+  // build status
+  const s = d.status || {};
+  asmBusy = !!s.running;
+  $("asm-phase").textContent = s.phase || "idle";
+  $("asm-phase").className = "stage-label small" + (s.phase === "done" ? " done" : s.phase === "error" ? " error" : s.phase === "paused" ? " paused" : "");
+  $("asm-pct").textContent = (s.percent || 0) + "%";
+  const fill = $("asm-fill"); fill.style.width = (s.percent || 0) + "%"; fill.classList.toggle("idle", !s.running);
+  let note = s.note || (s.running ? "working…" : "pick a length, set the mix, press Build");
+  if (s.phase === "error" && s.last_error) note = "error: " + s.last_error;
+  $("asm-note").textContent = note;
+  $("asm-build").disabled = asmBusy;
+  $("asm-build").textContent = asmBusy ? "● building…" : "🎞 Build long video";
+}
+async function buildLong() {
+  if (asmBusy) { toast("a build is already running"); return; }
+  const r = await api("/api/assemble", { duration: asmDur, weights: asmWeights });
+  toast(r.ok ? `building ${DUR_LABEL[asmDur] || asmDur} compilation…` : (r.msg || "could not start"));
+  loadAssembler();
+}
+async function cancelLong() { await api("/api/assemble/cancel", {}); toast("stopping build after current step…"); }
+async function cleanupNow() {
+  if (!confirm("Delete intermediate build files (FLUX images, 5s clips, last frames, concats) for masters first used over the retention period ago?\n\nFinished masters and compilations are kept. Continue?")) return;
+  const r = await api("/api/cleanup", {});
+  toast(`auto-clean removed ${r.removed ?? 0} intermediate files`);
+  refresh();
+}
+$("asm-build").addEventListener("click", buildLong);
+$("asm-cancel").addEventListener("click", cancelLong);
+$("asm-cleanup").addEventListener("click", cleanupNow);
+
 // ---- environment ----------------------------------------------------------
 async function health() {
   try {
@@ -335,8 +469,10 @@ $("ws-copy").addEventListener("click", () => {
 });
 
 // boot
-health(); refresh(); refreshLog(); loadGallery();
+health(); refresh(); refreshLog(); loadGallery(); loadAssembler(); refreshPreview();
 setInterval(refresh, 1000);
 setInterval(refreshLog, 2500);
 setInterval(paintClock, 1000);
 setInterval(loadGallery, 8000);
+setInterval(loadAssembler, 2000);
+setInterval(refreshPreview, 3000);

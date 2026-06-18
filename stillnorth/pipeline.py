@@ -28,6 +28,7 @@ from .config import get_config, STAGE_DIRS
 from . import comfy as comfymod
 from . import media
 from . import html_prompts
+from . import library as lib
 
 # process stage -> output folder key in config.STAGE_DIRS
 STAGE_OUT = {
@@ -60,6 +61,7 @@ class Pipeline:
         self.letters = {}    # key -> "A".."D"
         self.posemap = {}    # stem(<letter>_<key>) -> {letter, pose, speed}
         self.metrics = {}    # stage -> {n, fail, t, min, max}  (per-stage timing)
+        self.desired_running = False  # crash-safe intent: auto-resume on launch
         self.status = {
             "running": False, "stage": "idle", "label": "idle",
             "percent": 0, "stage_done": 0, "stage_total": 0,
@@ -77,6 +79,7 @@ class Pipeline:
                 self.letters = d.get("letters", {})
                 self.posemap = d.get("posemap", {})
                 self.metrics = d.get("metrics", {})
+                self.desired_running = bool(d.get("desired_running", False))
             except Exception:
                 pass
 
@@ -87,7 +90,8 @@ class Pipeline:
         tmp = p + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({"prompts": self.prompts, "letters": self.letters,
-                       "posemap": self.posemap, "metrics": self.metrics}, fh, indent=1)
+                       "posemap": self.posemap, "metrics": self.metrics,
+                       "desired_running": self.desired_running}, fh, indent=1)
         os.replace(tmp, p)
 
     def _log(self, msg):
@@ -131,6 +135,11 @@ class Pipeline:
             st["queue"] = self._queue_view()
             st["cancel"] = self.cancel_flag
             st["metrics"] = self._metrics_view()
+            st["desired_running"] = self.desired_running
+        try:
+            st["library"] = lib.bucket_counts(self.cfg)   # masters incl. used buckets
+        except Exception:
+            st["library"] = None
         return st
 
     def _metrics_view(self):
@@ -169,15 +178,46 @@ class Pipeline:
             if self._thread and self._thread.is_alive():
                 return False
             self.cancel_flag = False
+            self.desired_running = True       # remember intent across restarts
+            self._save_state()
             self.status.update(cancelled=False, last_error=None, note="starting…")
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
             return True
 
+    def maybe_auto_resume(self):
+        """Called once on launch. If the batch was running when the terminal
+        was closed or the PC shut down (intent persisted, work still pending),
+        resume it automatically -- no need to press Run again."""
+        if self.desired_running and self._pending_work():
+            self._log("auto-resume: batch was running before shutdown — resuming")
+            return self.start()
+        return False
+
+    def _pending_work(self):
+        """True if any stage still has an item to render (drives auto-resume)."""
+        if any(not self._exists("flux", k) for k in self.prompts):
+            return True
+        for stage in ("img_up", "vid1", "lastframe", "lf_up", "vid2",
+                      "concat", "final_up"):
+            if self._count(stage) < self._count_prev(stage):
+                return True
+        return self._count("final_up") < len(self.prompts)
+
+    def _count_prev(self, stage):
+        order = ["flux", "img_up", "classify", "vid1", "lastframe",
+                 "lf_up", "vid2", "concat", "final_up"]
+        i = order.index(stage)
+        return self._count(order[i - 1]) if i > 0 else len(self.prompts)
+
     def cancel(self):
         """Pause: stop after the current item; rendered files are kept so a
-        later Run resumes exactly where it stopped."""
+        later Run resumes exactly where it stopped. An explicit pause clears the
+        auto-resume intent (only an unexpected shutdown should auto-resume)."""
         self.cancel_flag = True
+        self.desired_running = False
+        with self.lock:
+            self._save_state()
         self.set_status(cancelled=True, note="finishing current item, then pausing…")
         self.comfy.interrupt()
         self._log("cancel requested")
@@ -185,6 +225,7 @@ class Pipeline:
     def clear_queue(self):
         """Forget queued prompts (does NOT delete already-rendered media)."""
         self.cancel_flag = True
+        self.desired_running = False
         self.comfy.interrupt()
         with self.lock:
             self.prompts = {}
@@ -199,6 +240,7 @@ class Pipeline:
         match a fresh start. forge.log is kept. Rendered media is NOT
         recoverable afterwards. Returns the number of stage folders removed."""
         self.cancel_flag = True
+        self.desired_running = False
         self.comfy.interrupt()
         t = self._thread
         if t and t.is_alive():
@@ -272,6 +314,9 @@ class Pipeline:
                                 cancelled=True,
                                 note="paused — press Run to resume where it stopped")
             else:
+                self.desired_running = False  # finished cleanly; nothing to resume
+                with self.lock:
+                    self._save_state()
                 self.set_status(running=False, stage="done", label="done",
                                 percent=100, stage_done=0, stage_total=0,
                                 cancelled=False, note="all stages complete ✓")
@@ -578,8 +623,12 @@ class Pipeline:
     # ---- STAGE 9: final video upscale x4 ---------------------------------
     def _stage_final_up(self):
         d = self.cfg.stage_dir("concat", ensure=False)
+        # skip a master that already exists ANYWHERE in the library: the
+        # assembler may have moved it out of 09_final_up4 into a used bucket,
+        # and a moved master is finished work, not missing work.
         stems = [s for s in self._stems_with_clip(d)
-                 if not self._exists("final_up", s, video=True)]
+                 if not self._exists("final_up", s, video=True)
+                 and not lib.master_exists(self.cfg, s)]
         if not stems:
             return 0
         out = self.cfg.stage_dir("final_up")

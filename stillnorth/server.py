@@ -22,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .config import get_config, STAGE_DIRS
 from .pipeline import get_pipeline
+from .assembler import get_assembler
 from . import media
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
@@ -64,6 +65,32 @@ def _list_outputs(cfg, limit=300):
             files.sort(key=lambda e: e["mtime"], reverse=True)
         out[key] = {"folder": folder, "files": files[:limit], "total": len(files)}
     return out
+
+
+def _last_artifact(cfg):
+    """The single most-recently written media file across every stage folder
+    (newest by mtime) -- powers the minimal 'last done only' preview."""
+    newest = None
+    for key, folder in STAGE_DIRS.items():
+        d = os.path.join(cfg.workspace, folder)
+        if not os.path.isdir(d):
+            continue
+        for f in os.listdir(d):
+            p = os.path.join(d, f)
+            ext = os.path.splitext(f)[1].lower()
+            kind = "image" if ext in IMG_EXTS else "video" if ext in VID_EXTS else None
+            if kind is None or not os.path.isfile(p):
+                continue
+            try:
+                mt = os.path.getmtime(p)
+            except OSError:
+                continue
+            if newest is None or mt > newest["_mt"]:
+                newest = {"rel": folder + "/" + f, "name": f, "kind": kind,
+                          "stage": key, "mtime": int(mt), "_mt": mt}
+    if newest:
+        newest.pop("_mt", None)
+    return newest
 
 
 def _safe_workspace_path(cfg, rel):
@@ -176,6 +203,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"lines": _tail_log(get_config(), 40)})
         if self.path == "/api/outputs":
             return self._send(200, _list_outputs(get_config()))
+        if self.path == "/api/preview":
+            return self._send(200, {"last": _last_artifact(get_config())})
+        if self.path == "/api/library":
+            return self._send(200, get_assembler().snapshot())
         if self.path.startswith("/api/file?"):
             rel = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("path", [""])[0]
             full = _safe_workspace_path(get_config(), rel)
@@ -207,12 +238,39 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/purge":
             removed = pipe.purge_outputs()
             return self._send(200, {"ok": True, "removed": removed})
+        if self.path == "/api/assemble":
+            d = self._body()
+            asm = get_assembler()
+            ok, msg = asm.start_build(d.get("duration", ""), d.get("weights"))
+            return self._send(200 if ok else 400, {"ok": ok, "msg": msg})
+        if self.path == "/api/assemble/cancel":
+            get_assembler().cancel()
+            return self._send(200, {"ok": True})
+        if self.path == "/api/weights":
+            d = self._body()
+            get_assembler().save_weights(d.get("weights", {}))
+            return self._send(200, {"ok": True})
+        if self.path == "/api/cleanup":
+            d = self._body()
+            removed = get_assembler().run_retention(dry_run=bool(d.get("dry_run")))
+            return self._send(200, {"ok": True, "removed": removed})
         return self._send(404, {"error": "unknown endpoint"})
 
 
 def serve(open_browser=True):
     cfg = get_config()
-    get_pipeline()  # init (loads state)
+    pipe = get_pipeline()   # init (loads state)
+    asm = get_assembler()
+    # crash-safe: if a batch / long-video build was running when the terminal
+    # was closed or the PC shut down, pick it up automatically on launch.
+    try:
+        if pipe.maybe_auto_resume():
+            print("auto-resumed the generation batch")
+        if asm.maybe_resume():
+            print("auto-resumed an unfinished long-video build")
+        asm.run_retention()    # one-week auto-delete of aged intermediates
+    except Exception as e:
+        print(f"startup resume/retention skipped: {e}")
     httpd = ThreadingHTTPServer((cfg.host, cfg.port), Handler)
     url = f"http://{cfg.host}:{cfg.port}"
     print(f"StillNorth Forge UI  ->  {url}")

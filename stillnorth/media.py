@@ -21,6 +21,31 @@ def _run(args):
                           stderr=subprocess.PIPE).returncode == 0
 
 
+def run_cancellable(args, cancel=None, poll=0.5):
+    """Run ffmpeg as a child process that can be aborted mid-encode.
+
+    Polls `cancel()` while it runs; on cancel the process is terminated and
+    (False, "cancelled") is returned. Lets a long compilation stop promptly
+    instead of blocking on one multi-minute ffmpeg call."""
+    import time
+    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        while proc.poll() is None:
+            if cancel and cancel():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    proc.kill()
+                return False, "cancelled"
+            time.sleep(poll)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    return (proc.returncode == 0), ("ok" if proc.returncode == 0 else "ffmpeg error")
+
+
 def vram():
     """(used_mb, total_mb, name) via nvidia-smi, or None if unavailable."""
     try:
@@ -70,3 +95,47 @@ def concat_pair(cfg, a, b, dst):
     return _run([cfg.ffmpeg, "-y", "-loglevel", "error", "-i", a, "-i", b,
                  "-filter_complex", fc, "-map", "[o]", "-r", str(cfg.fps)]
                 + _codec_args(cfg) + [dst]) and os.path.exists(dst)
+
+
+def probe_duration(cfg, path):
+    """Duration of a clip in seconds (float), or None."""
+    try:
+        out = subprocess.run(
+            [cfg.ffprobe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", path],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+        return float(out.splitlines()[0]) if out else None
+    except Exception:
+        return None
+
+
+def normalize_segment(cfg, src, dst_ts, height, fps, fade, duration, cancel=None):
+    """Render one library clip into a normalised, faded MPEG-TS segment so that
+    many of them concatenate by stream-copy (no re-encode) into the long video.
+
+    Scales to `height` (keeping aspect, even width), forces constant `fps`, and
+    fades to/from black for `fade` seconds at each end. All segments share the
+    same codec, pixel format and timebase, which is what makes the final
+    concat a cheap copy instead of a multi-hour re-encode."""
+    fade = max(0.0, float(fade))
+    out_start = max(0.0, (duration or 0.0) - fade)
+    chain = [f"scale=-2:{int(height)}:flags=lanczos", f"fps={fps}", "format=yuv420p"]
+    if fade > 0 and duration:
+        chain.append(f"fade=t=in:st=0:d={fade:g}")
+        chain.append(f"fade=t=out:st={out_start:g}:d={fade:g}")
+    vf = ",".join(chain)
+    args = [cfg.ffmpeg, "-y", "-loglevel", "error", "-i", src, "-an",
+            "-vf", vf, "-r", str(fps)] + _codec_args(cfg) + [
+            "-g", str(fps * 2), "-keyint_min", str(fps * 2), "-sc_threshold", "0",
+            "-video_track_timescale", "90000", "-f", "mpegts", dst_ts]
+    ok, _ = run_cancellable(args, cancel=cancel)
+    return ok and os.path.exists(dst_ts) and os.path.getsize(dst_ts) > 0
+
+
+def concat_copy(cfg, list_file, dst, cancel=None):
+    """Concatenate the MPEG-TS segments named in `list_file` (ffmpeg concat
+    demuxer) by stream copy into the final mp4 -- fast, no re-encode."""
+    args = [cfg.ffmpeg, "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
+            "-i", list_file, "-c", "copy", "-movflags", "+faststart", dst]
+    ok, _ = run_cancellable(args, cancel=cancel)
+    return ok and os.path.exists(dst) and os.path.getsize(dst) > 0

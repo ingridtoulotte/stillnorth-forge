@@ -23,5 +23,14 @@
   "nvenc": true,
   "upscale_denoise": "1.5:1.5:6:6",
   "upscale_sharp": "5:5:0.8:5:5:0.0",
-  "upscale_grain": "alls=6:allf=t+u"
+  "upscale_grain": "alls=6:allf=t+u",
+
+  "assembler": {
+    "fade_seconds": 1.0,
+    "target_height": 1080,
+    "avg_clip_seconds": 10.0,
+    "retention_days": 7,
+    "autodelete_enabled": true,
+    "default_weights": {"0": 60, "1": 20, "2": 10, "3": 6, "4": 4}
+  }
 }

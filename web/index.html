@@ -24,6 +24,7 @@
     <nav class="side-nav">
       <a href="#sec-input" class="nav-item">⬇ <span>Input</span></a>
       <a href="#sec-progress" class="nav-item">▤ <span>Progress</span></a>
+      <a href="#sec-assembler" class="nav-item">🎞 <span>Long video</span></a>
       <a href="#sec-queue" class="nav-item">☰ <span>Queue</span></a>
       <a href="#sec-activity" class="nav-item">⎙ <span>Activity</span></a>
       <a href="#sec-gallery" class="nav-item">▦ <span>Outputs</span></a>
@@ -102,6 +103,51 @@
         <span class="overall-label">finished masters</span>
         <div class="bar thin"><div id="overall-fill" class="bar-fill"></div></div>
         <span id="overall-text" class="muted">0 / 0</span>
+      </div>
+    </section>
+
+    <section class="card preview-card" id="sec-preview">
+      <h2>Last done <span class="muted" id="prev-meta"></span></h2>
+      <div id="preview" class="preview"><div class="empty">nothing rendered yet</div></div>
+    </section>
+
+    <section class="card asm-card" id="sec-assembler">
+      <h2>🎞 Long video assembler <span class="muted" id="asm-libtotal"></span></h2>
+      <div class="asm-grid">
+        <div class="asm-col">
+          <h3 class="asm-h3">Target length</h3>
+          <div id="asm-durations" class="asm-durs"></div>
+          <div class="asm-actions">
+            <button id="asm-build" class="btn primary">🎞 Build long video</button>
+            <button id="asm-cancel" class="btn">⏸ Stop build</button>
+          </div>
+          <div class="asm-progress">
+            <div class="stage-line">
+              <span id="asm-phase" class="stage-label small">idle</span>
+              <span id="asm-pct" class="stage-pct">0%</span>
+            </div>
+            <div class="bar"><div id="asm-fill" class="bar-fill idle"></div></div>
+            <div id="asm-note" class="stage-detail">pick a length, set the mix, press Build</div>
+          </div>
+        </div>
+
+        <div class="asm-col">
+          <h3 class="asm-h3">Clip mix <span class="muted">— fresh vs reused</span></h3>
+          <div id="asm-weights" class="asm-weights"></div>
+          <p class="asm-hint">Fresh, never-used clips are preferred by default. Use ◀ ▶ to shift the share drawn from each reuse level (auto-normalised to 100%). Clips are picked at random within each level, never in folder order. After a build, each clip used moves up one <code>11sec_used_N</code> folder.</p>
+        </div>
+      </div>
+
+      <div class="asm-foot">
+        <div class="asm-block">
+          <h3 class="asm-h3">Finished compilations</h3>
+          <ul id="asm-comp-list" class="comp-list"><li class="empty">none yet</li></ul>
+        </div>
+        <div class="asm-block">
+          <h3 class="asm-h3">Auto-clean intermediates</h3>
+          <p class="asm-hint" id="asm-retention-text">…</p>
+          <button id="asm-cleanup" class="btn ghost">🧹 Clean aged intermediates now</button>
+        </div>
       </div>
     </section>
 

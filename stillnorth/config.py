@@ -43,6 +43,7 @@ class Config:
 
         self.comfy_server = self.raw["comfy_server"]
         self.ffmpeg = os.path.normpath(self.raw["ffmpeg"])
+        self.ffprobe = self._sibling_tool(self.ffmpeg, "ffprobe")
         self.comfy_input = os.path.normpath(self.raw["comfy_input_dir"])
         self.comfy_output = os.path.normpath(self.raw["comfy_output_dir"])
         self.workspace_subdir = self.raw["workspace_subdir"]
@@ -70,6 +71,24 @@ class Config:
         self.poses = self.motion["poses"]
         self.speed_by_pose = self.motion["speed_by_pose"]
         self.classes = self.motion["classes"]
+
+        # long-video assembler (all optional, with safe defaults)
+        a = self.raw.get("assembler", {})
+        self.asm_fade = float(a.get("fade_seconds", 1.0))
+        self.asm_height = int(a.get("target_height", 1080))
+        self.asm_clip_len = float(a.get("avg_clip_seconds", 10.0))
+        self.retention_days = int(a.get("retention_days", 7))
+        self.autodelete = bool(a.get("autodelete_enabled", True))
+        self.asm_default_weights = a.get(
+            "default_weights", {"0": 60, "1": 20, "2": 10, "3": 6, "4": 4})
+
+    @staticmethod
+    def _sibling_tool(ffmpeg_path, name):
+        """Path to a tool that ships beside ffmpeg (e.g. ffprobe), keeping the
+        original extension so it resolves on Windows (.exe) and POSIX alike."""
+        d, base = os.path.split(ffmpeg_path)
+        ext = os.path.splitext(base)[1]
+        return os.path.join(d, name + ext)
 
     # -- paths --------------------------------------------------------------
     def stage_dir(self, stage, ensure=True):
