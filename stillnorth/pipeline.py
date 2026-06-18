@@ -24,7 +24,7 @@ import threading
 import time
 import traceback
 
-from .config import get_config
+from .config import get_config, STAGE_DIRS
 from . import comfy as comfymod
 from . import media
 from . import html_prompts
@@ -163,6 +163,41 @@ class Pipeline:
             self.posemap = {}
             self._save_state()
         self._log("queue cleared")
+
+    def purge_outputs(self):
+        """DESTRUCTIVE. Stop the worker, delete every rendered stage folder and
+        the persisted state, and reset to a clean slate so the pipeline counts
+        match a fresh start. forge.log is kept. Rendered media is NOT
+        recoverable afterwards. Returns the number of stage folders removed."""
+        self.cancel_flag = True
+        self.comfy.interrupt()
+        t = self._thread
+        if t and t.is_alive():
+            t.join(timeout=15)            # let the worker release any open files
+        removed = 0
+        for key in STAGE_DIRS:
+            d = self.cfg.stage_dir(key, ensure=False)
+            if os.path.isdir(d):
+                try:
+                    shutil.rmtree(d)
+                    removed += 1
+                except Exception as e:
+                    self._log(f"purge: could not remove {d}: {e}")
+        with self.lock:
+            self.prompts = {}
+            self.letters = {}
+            self.posemap = {}
+            try:
+                sp = self.cfg.state_path()
+                if os.path.exists(sp):
+                    os.remove(sp)
+            except OSError:
+                pass
+            self.status.update(stage="idle", label="idle", percent=0,
+                               stage_done=0, stage_total=0, note="",
+                               cancelled=False, last_error=None)
+        self._log(f"purge: removed {removed} stage folders + state (clean slate)")
+        return removed
 
     # -- helpers ------------------------------------------------------------
     def _count(self, stage):

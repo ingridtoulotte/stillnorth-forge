@@ -11,6 +11,7 @@ POST /api/ingest       -> {name, html}  add prompts from one HTML payload
 POST /api/run          -> start/resume the worker
 POST /api/cancel       -> pause after current item (resumable)
 POST /api/clear        -> forget queued prompts (keeps rendered media)
+POST /api/purge        -> DESTRUCTIVE: delete all rendered output + reset state
 """
 import json
 import os
@@ -112,6 +113,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/clear":
             pipe.clear_queue()
             return self._send(200, {"ok": True})
+        if self.path == "/api/purge":
+            removed = pipe.purge_outputs()
+            return self._send(200, {"ok": True, "removed": removed})
         return self._send(404, {"error": "unknown endpoint"})
 
 

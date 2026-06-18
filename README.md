@@ -20,6 +20,10 @@ The whole point. The pipeline **never** runs one prompt all the way down the cha
 
 That means FLUX loads once for the whole image batch and Wan 2.2 loads once per video batch, instead of thrashing both models in and out of VRAM on every single prompt. On a 16 GB card that is the difference between hours and days.
 
+### Rough throughput
+
+On a single RTX 5070 Ti the **two Wan 2.2 clips dominate** the per-prompt cost (~2–5 min each); everything else is seconds. End-to-end one prompt — FLUX image → ×2 → classify → clip 1 → last frame → ×4 → clip 2 → concat → final ×4 — lands around **≈ 7–12 minutes**, almost all of it the two video renders. The exact number is GPU-, resolution- and LoRA-dependent; the UI now shows a live **avg/item** and **stage ETA** so you get your real number after the first few items.
+
 ## The 4 motion classes
 
 A zero-shot **CLIP** classifier (mirrored from the project's `tsn_classify.py`, same model and class prompts) sorts each FLUX image by **content**. Each content class is then animated with the Wan 2.2 motion prompt that physically fits it:
@@ -68,7 +72,9 @@ python -m stillnorth nodes workflows\image_flux2_text_to_image.json   # find nod
 ## The UI
 
 - **Drag-and-drop zone** — one or many `.html` files; add more anytime.
-- **Run / Resume**, **Cancel** (pause; resumable), **Clear queue** (forget pending prompts, keep rendered media).
+- **Run / Resume** (`R`), **Cancel** (`C`; pause, resumable), **Clear queue** (forget pending prompts, **keep** rendered media), **Purge outputs** (destructive — **delete** every rendered image/clip and reset to a clean slate).
+- **Left sidebar** — live stats (prompts in set, finished masters, elapsed, avg/item, stage ETA), VRAM gauge, the output-folder path (with copy), and the environment health pills.
+- **Activity feed** — a live colour-coded tail of `forge.log`.
 - **Live GPU VRAM** gauge (via `nvidia-smi`).
 - **Progress bar + stage text** that reports exactly where you are: `image batch 42%`, `upscaling the flux images 80%`, `1st vid batch …`, `upscaling the lastframes (1st vid) …`, `2nd vid batch …`, `final upscale …`.
 - **Pipeline strip** showing the live output count at every one of the 9 stages, with the active stage highlighted.

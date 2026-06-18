@@ -9,76 +9,112 @@
 <body>
 <div class="aurora"></div>
 
-<header class="topbar">
-  <div class="brand">
-    <span class="logo">❄</span>
-    <div>
-      <h1>STILL NORTH <span>· FORGE</span></h1>
-      <p>HTML prompts → FLUX.2 → Wan 2.2 → long loops · staged batch pipeline</p>
-    </div>
-  </div>
-  <div class="health" id="health">
-    <span class="pill" id="pill-comfy">ComfyUI …</span>
-    <span class="pill" id="pill-ffmpeg">ffmpeg …</span>
-  </div>
-</header>
-
-<main>
-  <section class="card drop-card">
-    <div id="dropzone" class="dropzone">
-      <div class="dz-inner">
-        <div class="dz-icon">⬇</div>
-        <p class="dz-title">Drop HTML prompt files here</p>
-        <p class="dz-sub">or <button id="browse" class="link">browse</button> · add more anytime, even mid-batch</p>
-        <input id="file" type="file" accept=".html,.htm" multiple hidden />
+<div class="app">
+  <!-- ===================== LEFT SIDEBAR ===================== -->
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <span class="logo">❄</span>
+      <div>
+        <h1>STILL NORTH</h1>
+        <p class="brand-sub">· FORGE</p>
       </div>
     </div>
-    <div class="controls">
-      <button id="run" class="btn primary">▶ Run / Resume</button>
-      <button id="cancel" class="btn">⏸ Cancel</button>
-      <button id="clear" class="btn ghost">✕ Clear queue</button>
+
+    <nav class="side-nav">
+      <a href="#sec-input" class="nav-item">⬇ <span>Input</span></a>
+      <a href="#sec-progress" class="nav-item">▤ <span>Progress</span></a>
+      <a href="#sec-queue" class="nav-item">☰ <span>Queue</span></a>
+      <a href="#sec-activity" class="nav-item">⎙ <span>Activity</span></a>
+    </nav>
+
+    <div class="side-block">
+      <h3>Live stats</h3>
+      <div class="stat"><span>Prompts in set</span><b id="stat-prompts">0</b></div>
+      <div class="stat"><span>Finished masters</span><b id="stat-masters">0</b></div>
+      <div class="stat"><span>Elapsed</span><b id="stat-elapsed">—</b></div>
+      <div class="stat"><span>Avg / item</span><b id="stat-avg">—</b></div>
+      <div class="stat"><span>Stage ETA</span><b id="stat-eta">—</b></div>
     </div>
-    <div id="toast" class="toast"></div>
-  </section>
 
-  <section class="card progress-card">
-    <div class="stage-line">
-      <span id="stage-label" class="stage-label">idle</span>
-      <span class="stage-right">
-        <span id="stage-timer" class="stage-timer"></span>
-        <span id="stage-pct" class="stage-pct">0%</span>
-      </span>
-    </div>
-    <div class="bar"><div id="bar-fill" class="bar-fill"></div></div>
-    <div id="stage-detail" class="stage-detail">waiting for input</div>
-
-    <div class="pipeline" id="pipeline"></div>
-
-    <div class="overall">
-      <span class="overall-label">finished masters</span>
-      <div class="bar thin"><div id="overall-fill" class="bar-fill"></div></div>
-      <span id="overall-text" class="muted">0 / 0</span>
-    </div>
-  </section>
-
-  <div class="grid">
-    <section class="card vram-card">
-      <h2>GPU VRAM</h2>
+    <div class="side-block">
+      <h3>GPU VRAM</h3>
       <div class="gauge"><div id="vram-fill" class="gauge-fill"></div></div>
-      <div class="vram-text"><span id="vram-val">—</span><span id="vram-name"></span></div>
+      <div class="vram-text"><span id="vram-val">—</span></div>
+      <div class="vram-name" id="vram-name"></div>
+    </div>
+
+    <div class="side-block">
+      <h3>Output folder</h3>
+      <div class="ws-row">
+        <code id="ws-path" class="ws-path">…</code>
+        <button id="ws-copy" class="mini-btn" title="copy path">⧉</button>
+      </div>
+    </div>
+
+    <div class="side-block health-block">
+      <h3>Environment</h3>
+      <div class="health">
+        <span class="pill" id="pill-comfy">ComfyUI …</span>
+        <span class="pill" id="pill-ffmpeg">ffmpeg …</span>
+      </div>
+    </div>
+
+    <div class="side-foot">R run · C cancel · keys</div>
+  </aside>
+
+  <!-- ===================== MAIN CONTENT ===================== -->
+  <main class="content">
+    <section class="card drop-card" id="sec-input">
+      <div id="dropzone" class="dropzone">
+        <div class="dz-inner">
+          <div class="dz-icon">⬇</div>
+          <p class="dz-title">Drop HTML prompt files here</p>
+          <p class="dz-sub">or <button id="browse" class="link">browse</button> · add more anytime, even mid-batch</p>
+          <input id="file" type="file" accept=".html,.htm" multiple hidden />
+        </div>
+      </div>
+      <div class="controls">
+        <button id="run" class="btn primary">▶ Run / Resume</button>
+        <button id="cancel" class="btn">⏸ Cancel</button>
+        <button id="clear" class="btn ghost">✕ Clear queue</button>
+        <button id="purge" class="btn danger">🗑 Purge outputs</button>
+      </div>
+      <div id="toast" class="toast"></div>
     </section>
 
-    <section class="card queue-card">
-      <h2>Queue <span id="queue-total" class="muted"></span></h2>
-      <ul id="queue" class="queue"></ul>
-    </section>
-  </div>
+    <section class="card progress-card" id="sec-progress">
+      <div class="stage-line">
+        <span id="stage-label" class="stage-label">idle</span>
+        <span class="stage-right">
+          <span id="stage-timer" class="stage-timer"></span>
+          <span id="stage-pct" class="stage-pct">0%</span>
+        </span>
+      </div>
+      <div class="bar"><div id="bar-fill" class="bar-fill"></div></div>
+      <div id="stage-detail" class="stage-detail">waiting for input</div>
 
-  <section class="card log-card">
-    <h2>Activity <span class="muted">live · forge.log</span></h2>
-    <ul id="log" class="log"><li class="empty">no activity yet</li></ul>
-  </section>
-</main>
+      <div class="pipeline" id="pipeline"></div>
+
+      <div class="overall">
+        <span class="overall-label">finished masters</span>
+        <div class="bar thin"><div id="overall-fill" class="bar-fill"></div></div>
+        <span id="overall-text" class="muted">0 / 0</span>
+      </div>
+    </section>
+
+    <div class="grid">
+      <section class="card queue-card" id="sec-queue">
+        <h2>Queue <span id="queue-total" class="muted"></span></h2>
+        <ul id="queue" class="queue"></ul>
+      </section>
+
+      <section class="card log-card" id="sec-activity">
+        <h2>Activity <span class="muted">live · forge.log</span></h2>
+        <ul id="log" class="log"><li class="empty">no activity yet</li></ul>
+      </section>
+    </div>
+  </main>
+</div>
 
 <script src="/app.js"></script>
 </body>
