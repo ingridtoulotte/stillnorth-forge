@@ -38,7 +38,9 @@ A zero-shot **CLIP** classifier (mirrored from the project's `tsn_classify.py`, 
 
 All four are broad, realistic and loopable so a single prompt fits every image in its class. Edit them freely in **`config/motion_prompts.json`** — they are sent verbatim.
 
-**Direction continuity:** clip 1 picks a random camera move (`Pan Up/Left/Right`, `Zoom In/Out`) and records it. The continuation clip starts from clip 1's **upscaled last frame** and is **forced to the same camera move + speed**, so the two halves push the camera the same way and concatenate seamlessly (clip 2's first frame == clip 1's last frame, so it is dropped at the join).
+**One native ~10 s clip (default).** Each master is rendered as a **single native Wan pass** (`native_long: true`, `native_long_frames: 161` ≈ 10 s @ 16 fps). This is the proven "11 s natif" recipe: because there is no second clip, there is **no seam and no quality step** — sharpness is uniform end-to-end (measured clip-start vs clip-end variance-of-Laplacian ratio ≈ 1.00, vs ≈ 0.67 for the old two-clip continuation, where clip 2 came out visibly softer). Fits a 16 GB card.
+
+**Continuation fallback.** Set `native_long: false` to fall back to the two-clip method: clip 1 picks a random camera move (`Pan Up/Left/Right`, `Zoom In/Out`); the continuation clip starts from clip 1's last frame, **forced to the same camera move + speed**, and the two are concatenated (clip 2's duplicate first frame dropped). In this mode `continuation_seed: native` (default) feeds Wan the crisp **native** last frame rather than the ×4-lanczos one — the upscale only round-trips a blur since Wan resizes the seed back to 832×480 anyway.
 
 ---
 
@@ -131,7 +133,7 @@ python -m stillnorth nodes workflows\image_flux2_text_to_image.json   # find nod
 
 Everything tunable lives in `config/` — no Python edits needed.
 
-- **`config/config.json`** — ComfyUI address, ffmpeg path (ffprobe is found beside it), ComfyUI input/output dirs, server host/port, upscale multipliers (`2` / `4` / `4`), fps, codec/quality, the Route-1 upscale filter chain, timeouts, and `submit_retries` / `retry_backoff_seconds` (each ComfyUI render is retried with exponential backoff before it's marked failed; failures are categorised — offline / workflow / GPU-timeout — in the log and status). The `assembler` block tunes the long-video feature: `fade_seconds`, `target_height`, `avg_clip_seconds`, `retention_days`, `autodelete_enabled`, and the default usage-bucket `default_weights`.
+- **`config/config.json`** — ComfyUI address, ffmpeg path (ffprobe is found beside it), ComfyUI input/output dirs, server host/port, upscale multipliers (`2` / `4` / `4`), fps, codec/quality, the Route-1 upscale filter chain, `native_long` + `native_long_frames` (one-pass clip, the seam fix) and `continuation_seed`, timeouts, and `submit_retries` / `retry_backoff_seconds` (each ComfyUI render is retried with exponential backoff before it's marked failed; failures are categorised — offline / workflow / GPU-timeout — in the log and status). The `assembler` block tunes the long-video feature: `fade_seconds`, `target_height`, `avg_clip_seconds`, `retention_days`, `autodelete_enabled`, and the default usage-bucket `default_weights`.
 - **`config/workflows.json`** — the node-id map into each workflow. Re-exported a workflow and the ids changed? Run `python -m stillnorth nodes <file>` and fix them here.
 - **`config/motion_prompts.json`** — the 4 motion prompts, the camera poses and per-pose speed.
 

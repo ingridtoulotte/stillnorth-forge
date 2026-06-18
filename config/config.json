@@ -18,6 +18,10 @@
   "lastframe_upscale_mult": 4,
   "final_upscale_mult": 4,
 
+  "continuation_seed": "native",
+  "native_long": true,
+  "native_long_frames": 161,
+
   "fps": 16,
   "video_cq": 19,
   "nvenc": true,

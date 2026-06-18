@@ -198,8 +198,9 @@ class Pipeline:
         """True if any stage still has an item to render (drives auto-resume)."""
         if any(not self._exists("flux", k) for k in self.prompts):
             return True
-        for stage in ("img_up", "vid1", "lastframe", "lf_up", "vid2",
-                      "concat", "final_up"):
+        stages = ["img_up", "vid1", "concat", "final_up"] if self.cfg.native_long \
+            else ["img_up", "vid1", "lastframe", "lf_up", "vid2", "concat", "final_up"]
+        for stage in stages:
             if self._count(stage) < self._count_prev(stage):
                 return True
         return self._count("final_up") < len(self.prompts)
@@ -521,7 +522,10 @@ class Pipeline:
             pose = random.choice(self.cfg.poses)          # randomized direction
             speed = self.cfg.speed_by_pose[pose]
             self.posemap[s] = {"letter": letter, "pose": pose, "speed": speed}
-            if self._wan_clip(base, wf, src_dir, s, letter, pose, speed, "vid1"):
+            # native_long renders the whole ~10s clip here in one pass
+            length = self.cfg.native_frames if self.cfg.native_long else None
+            if self._wan_clip(base, wf, src_dir, s, letter, pose, speed, "vid1",
+                              length=length):
                 done += 1
                 with self.lock:
                     self._save_state()
@@ -530,6 +534,8 @@ class Pipeline:
 
     # ---- STAGE 5: last frame of each first clip --------------------------
     def _stage_lastframe(self):
+        if self.cfg.native_long:      # one native clip -> no continuation chain
+            return 0
         src_dir = self.cfg.stage_dir("vid1", ensure=False)
         stems = [s for s in self._stems_with_clip(src_dir)
                  if not self._exists("lastframe", s)]
@@ -553,6 +559,11 @@ class Pipeline:
 
     # ---- STAGE 6: last-frame upscale x4 ----------------------------------
     def _stage_lf_up(self):
+        # In "native" continuation mode the upscaled last frame is not used as
+        # the clip-2 seed (Wan resizes the seed back to 832x480 anyway, so the
+        # x4 lanczos only round-trips a blur). Skip the stage entirely.
+        if self.cfg.native_long or self.cfg.cont_seed == "native":
+            return 0
         src_dir = self.cfg.stage_dir("lastframe", ensure=False)
         stems = [s for s in self._stems_with_png(src_dir)
                  if not self._exists("lf_up", s)]
@@ -576,7 +587,13 @@ class Pipeline:
 
     # ---- STAGE 7: continuation Wan clips (forced same direction) ---------
     def _stage_vid2(self):
-        src_dir = self.cfg.stage_dir("lf_up", ensure=False)
+        if self.cfg.native_long:      # whole clip already rendered in stage vid1
+            return 0
+        # Seed clip 2 from the crisp NATIVE last frame (832x480 = clip 1's real
+        # last frame) so the continuation matches clip 1's sharpness. Seeding
+        # from the x4-upscaled frame made clip 2 visibly softer than clip 1.
+        seed_stage = "lastframe" if self.cfg.cont_seed == "native" else "lf_up"
+        src_dir = self.cfg.stage_dir(seed_stage, ensure=False)
         stems = [s for s in self._stems_with_png(src_dir)
                  if s in self.posemap and not self._exists("vid2", s, video=True)]
         if not stems:
@@ -599,8 +616,13 @@ class Pipeline:
     # ---- STAGE 8: concat clip1 + clip2 -> ~10-11s ------------------------
     def _stage_concat(self):
         d1 = self.cfg.stage_dir("vid1", ensure=False)
+        # native_long: the ~10s clip is the single vid1 render -> there is no
+        # clip2 to join, so just promote vid1 to the concat output unchanged
+        # (a copy, no re-encode) and final_up upscales it like any other.
+        native = self.cfg.native_long
         stems = [s for s in self._stems_with_clip(d1)
-                 if self._clip_path("vid2", s) and not self._exists("concat", s, video=True)]
+                 if (native or self._clip_path("vid2", s))
+                 and not self._exists("concat", s, video=True)]
         if not stems:
             return 0
         out = self.cfg.stage_dir("concat")
@@ -611,14 +633,26 @@ class Pipeline:
                 break
             self._working("concat", done + 1, len(stems))
             a = self._clip_path("vid1", s)
-            b = self._clip_path("vid2", s)
             dst = os.path.join(out, s + ".mp4")
-            if media.concat_pair(self.cfg, a, b, dst):
+            if native:
+                ok = bool(a) and self._promote_clip(a, dst)
+            else:
+                ok = media.concat_pair(self.cfg, a, self._clip_path("vid2", s), dst)
+            if ok:
                 done += 1
             else:
                 self._log(f"concat FAIL {s}")
             self._tick("concat", done, len(stems))
         return done
+
+    @staticmethod
+    def _promote_clip(src, dst):
+        """Copy a single native clip to the concat slot (no re-encode)."""
+        try:
+            shutil.copy2(src, dst)
+            return os.path.exists(dst)
+        except OSError:
+            return False
 
     # ---- STAGE 9: final video upscale x4 ---------------------------------
     def _stage_final_up(self):
@@ -648,7 +682,8 @@ class Pipeline:
         return done
 
     # -- Wan clip submit (shared by vid1 + vid2) ---------------------------
-    def _wan_clip(self, base, wf, src_dir, stem, letter, pose, speed, out_stage):
+    def _wan_clip(self, base, wf, src_dir, stem, letter, pose, speed, out_stage,
+                  length=None):
         src = os.path.join(src_dir, stem + ".png")
         staged = os.path.join(self.cfg.comfy_input, stem + ".png")
         try:
@@ -662,6 +697,8 @@ class Pipeline:
         g[wf["node_text"]]["inputs"][wf["field_text"]] = self.cfg.motion_text(letter)
         g[wf["node_camera"]]["inputs"][wf["field_pose"]] = pose
         g[wf["node_camera"]]["inputs"][wf["field_speed"]] = speed
+        if length and wf.get("node_length"):
+            g[wf["node_length"]]["inputs"][wf["field_length"]] = int(length)
         g[wf["node_seed"]]["inputs"][wf["field_seed"]] = random.randint(0, 2**31 - 1)
         g[wf["node_save"]]["inputs"][wf["field_save"]] = self.cfg.comfy_prefix(out_stage, stem)
         ok, msg = self._submit(g, self.cfg.timeout_vid, out_stage)

@@ -61,6 +61,15 @@ class Config:
         self.img_mult = int(self.raw["image_upscale_mult"])
         self.lf_mult = int(self.raw["lastframe_upscale_mult"])
         self.final_mult = int(self.raw["final_upscale_mult"])
+        # how the continuation clip is seeded: "native" feeds Wan the crisp
+        # native-resolution last frame (proven seamless recipe); "upscaled"
+        # feeds the x4 lanczos lastframe (round-trips a blur -> softer clip 2).
+        self.cont_seed = str(self.raw.get("continuation_seed", "native")).lower()
+        # native_long: render the whole ~10s clip in ONE Wan pass instead of
+        # clip1 + a softer continuation clip2. No seam, no quality step -- the
+        # proven "11s natif" fix. Falls back to continuation if disabled.
+        self.native_long = bool(self.raw.get("native_long", True))
+        self.native_frames = int(self.raw.get("native_long_frames", 161))
         self.fps = int(self.raw["fps"])
         self.cq = int(self.raw["video_cq"])
         self.nvenc = bool(self.raw["nvenc"])

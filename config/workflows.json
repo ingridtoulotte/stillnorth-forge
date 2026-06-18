@@ -13,6 +13,7 @@
     "node_image":  "79", "field_image":  "image",
     "node_text":   "81", "field_text":   "text",
     "node_camera": "87", "field_pose":   "camera_pose", "field_speed": "speed",
+    "node_length": "87", "field_length": "length",
     "node_seed":   "71", "field_seed":   "noise_seed",
     "node_save":   "73", "field_save":   "filename_prefix"
   }

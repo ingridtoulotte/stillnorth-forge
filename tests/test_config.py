@@ -72,6 +72,18 @@ def test_config_numbers_sane():
     assert CFG.comfy_prefix("flux", "abc").endswith("/01_flux/abc")
 
 
+def test_native_long_config_and_node_map():
+    """The seam fix renders the whole clip in one native Wan pass; that needs a
+    length-node map and sane frame count."""
+    assert isinstance(CFG.native_long, bool)
+    assert CFG.native_frames > 1
+    assert CFG.cont_seed in ("native", "upscaled")
+    if CFG.native_long:                      # length override must be mappable
+        wf = _wf("wan")
+        m = CFG.workflows["wan"]
+        _assert_node_field(wf, m["node_length"], m["field_length"], "wan.length")
+
+
 def test_nodes_cli_resolves_workflows():
     """`stillnorth nodes <name>` must accept a bare filename (resolved against
     workflows/) and return None for a bogus name instead of crashing."""
