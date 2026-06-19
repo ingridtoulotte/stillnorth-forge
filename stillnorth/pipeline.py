@@ -20,6 +20,7 @@ import json
 import os
 import random
 import shutil
+import subprocess
 import threading
 import time
 import traceback
@@ -27,6 +28,7 @@ import traceback
 from .config import get_config, STAGE_DIRS
 from . import comfy as comfymod
 from . import media
+from . import finish
 from . import html_prompts
 from . import library as lib
 
@@ -536,6 +538,8 @@ class Pipeline:
     def _stage_lastframe(self):
         if self.cfg.native_long:      # one native clip -> no continuation chain
             return 0
+        if self.cfg.continuation_mode == "native_overlap":
+            return 0                  # continuation reads frames from clip1 directly
         src_dir = self.cfg.stage_dir("vid1", ensure=False)
         stems = [s for s in self._stems_with_clip(src_dir)
                  if not self._exists("lastframe", s)]
@@ -589,6 +593,8 @@ class Pipeline:
     def _stage_vid2(self):
         if self.cfg.native_long:      # whole clip already rendered in stage vid1
             return 0
+        if self.cfg.continuation_mode == "native_overlap":
+            return self._stage_vid2_native()
         # Seed clip 2 from the crisp NATIVE last frame (832x480 = clip 1's real
         # last frame) so the continuation matches clip 1's sharpness. Seeding
         # from the x4-upscaled frame made clip 2 visibly softer than clip 1.
@@ -613,6 +619,72 @@ class Pipeline:
             self._tick("vid2", done, len(stems))
         return done
 
+    # ---- STAGE 7 (native-overlap): motion-conditioned continuation -------
+    def _stage_vid2_native(self):
+        """Seed the continuation with clip1's last `overlap` real frames (camera
+        embedding dropped) so Wan continues the actual motion in one pass -> no
+        surge/colour/speed/blur seam by construction. Output = raw 97f clip."""
+        d1 = self.cfg.stage_dir("vid1", ensure=False)
+        stems = [s for s in self._stems_with_clip(d1)
+                 if s in self.posemap and not self._exists("vid2", s, video=True)]
+        if not stems:
+            return 0
+        wf = self.cfg.workflows["wan"]
+        base = self._load_wf("wan")
+        self._begin("vid2", len(stems))
+        done = 0
+        for s in stems:
+            if self.cancel_flag:
+                break
+            self._working("vid2", done + 1, len(stems))
+            clip1 = self._clip_path("vid1", s)
+            letter = self.posemap[s].get("letter", s.split("_", 1)[0])
+            if clip1 and self._wan_continuation(base, wf, clip1, s, letter):
+                done += 1
+                with self.lock:
+                    self._save_state()
+            self._tick("vid2", done, len(stems))
+        return done
+
+    def _clip_nframes(self, path):
+        try:
+            out = subprocess.run(
+                [self.cfg.ffprobe, "-v", "error", "-select_streams", "v:0",
+                 "-count_frames", "-show_entries", "stream=nb_read_frames",
+                 "-of", "csv=p=0", path],
+                capture_output=True, text=True, timeout=120).stdout.strip()
+            return int(out.splitlines()[0])
+        except Exception:
+            return 0
+
+    def _wan_continuation(self, base, wf, clip1_path, stem, letter):
+        n1 = self._clip_nframes(clip1_path) or 81
+        ov = self.cfg.overlap_frames
+        g = json.loads(json.dumps(base))
+        g["200"] = {"class_type": "VHS_LoadVideoPath",
+                    "_meta": {"title": "clip1 tail"},
+                    "inputs": {"video": clip1_path, "force_rate": 0.0,
+                               "custom_width": 0, "custom_height": 0,
+                               "frame_load_cap": ov,
+                               "skip_first_frames": max(0, n1 - ov),
+                               "select_every_nth": 1}}
+        g[wf["node_wci2v"]]["inputs"][wf["field_start_image"]] = ["200", 0]
+        g[wf["node_text"]]["inputs"][wf["field_text"]] = self.cfg.motion_text(letter)
+        if wf.get("node_length"):
+            g[wf["node_length"]]["inputs"][wf["field_length"]] = \
+                int(self.cfg.continuation_length)
+        if self.cfg.continuation_drop_camera:
+            g[wf["node_wci2v"]]["inputs"].pop(wf["field_camera_cond"], None)
+        g[wf["node_seed"]]["inputs"][wf["field_seed"]] = random.randint(0, 2**31 - 1)
+        g[wf["node_save"]]["inputs"][wf["field_save"]] = \
+            self.cfg.comfy_prefix("vid2", stem)
+        ok, msg = self._submit(g, self.cfg.timeout_vid, "vid2")
+        if ok and comfymod.rename_out(self.cfg.stage_dir("vid2"), stem,
+                                      (".mp4", ".webm")):
+            return True
+        self._log(f"vid2 continuation FAIL {stem}: {msg}")
+        return False
+
     # ---- STAGE 8: concat clip1 + clip2 -> ~10-11s ------------------------
     def _stage_concat(self):
         d1 = self.cfg.stage_dir("vid1", ensure=False)
@@ -636,6 +708,9 @@ class Pipeline:
             dst = os.path.join(out, s + ".mp4")
             if native:
                 ok = bool(a) and self._promote_clip(a, dst)
+            elif self.cfg.continuation_mode == "native_overlap":
+                raw = self._clip_path("vid2", s)
+                ok = bool(a) and bool(raw) and finish.gold_join(self.cfg, a, raw, dst)
             else:
                 ok = media.concat_pair(self.cfg, a, self._clip_path("vid2", s), dst)
             if ok:
@@ -674,7 +749,11 @@ class Pipeline:
             self._working("final_up", done + 1, len(stems))
             src = self._clip_path("concat", s)
             dst = os.path.join(out, s + ".mp4")
-            if media.upscale_video(self.cfg, src, dst, self.cfg.final_mult):
+            if self.cfg.final_upscaler == "esrgan" and finish.esrgan_available(self.cfg):
+                ok = finish.esrgan_finish(self.cfg, src, dst)
+            else:
+                ok = media.upscale_video(self.cfg, src, dst, self.cfg.final_mult)
+            if ok:
                 done += 1
             else:
                 self._log(f"final_up FAIL {s}")

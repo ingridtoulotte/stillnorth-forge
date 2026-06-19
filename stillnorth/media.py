@@ -1,8 +1,10 @@
 """ffmpeg helpers (upscale / last-frame / concat) and GPU VRAM polling.
 
 Upscaling is multiplier-based (scale=iw*N:ih*N) so it is resolution-agnostic and
-honours the literal "x2 / x4" the pipeline asks for. The video chain reuses the
-project's proven Route-1 recipe: hqdn3d -> lanczos -> unsharp -> filmic grain.
+honours the literal "x2 / x4" the pipeline asks for. The video chain is
+optional-denoise -> lanczos -> unsharp; added grain is OFF by default (it was
+the source of the "noisy/grainy" look and only inflated bitrate). Each filter
+is gated by config, so `upscale_denoise`/`upscale_grain` empty = skipped.
 """
 import os
 import subprocess
@@ -87,18 +89,66 @@ def last_frame(cfg, clip, dst):
                  "-i", clip, "-update", "1", dst]) and os.path.exists(dst)
 
 
+def _avg_yuv(cfg, pre_args, sel_filter):
+    """Mean (Y, U, V) over the frames selected by `sel_filter` (e.g. a clip's
+    head or tail), via signalstats metadata. Returns (None, None, None) on any
+    failure so callers can degrade gracefully."""
+    args = ([cfg.ffmpeg, "-hide_banner", "-loglevel", "info"] + pre_args
+            + ["-vf", f"{sel_filter}signalstats,metadata=print", "-an",
+               "-f", "null", "-"])
+    try:
+        err = subprocess.run(args, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.PIPE, text=True).stderr
+    except Exception:
+        return (None, None, None)
+    acc = {"YAVG": [], "UAVG": [], "VAVG": []}
+    for line in err.splitlines():
+        for k in acc:
+            tag = f"signalstats.{k}="
+            if tag in line:
+                try:
+                    acc[k].append(float(line.split(tag, 1)[1].strip()))
+                except ValueError:
+                    pass
+    out = tuple((sum(v) / len(v)) if v else None
+                for v in (acc["YAVG"], acc["UAVG"], acc["VAVG"]))
+    return out
+
+
+def _seam_match_filter(cfg, a, b):
+    """ffmpeg filter that pulls clip b's head onto clip a's tail in luma/chroma.
+
+    Wan re-exposes the continuation clip (seeded from a single still), so clip 2
+    starts a few levels off clip 1's last frame -- a visible brightness/grade
+    step at the cut. Measure both sides and offset clip 2 by the difference.
+    Returns "" if the offset is negligible or measurement failed."""
+    y1, u1, v1 = _avg_yuv(cfg, ["-sseof", "-0.4", "-i", a], "")
+    y2, u2, v2 = _avg_yuv(cfg, ["-i", b], "select='between(n\\,1\\,6)',")
+    if None in (y1, y2, u1, u2, v1, v2):
+        return ""
+    dy, du, dv = y1 - y2, u1 - u2, v1 - v2
+    if abs(dy) < 0.5 and abs(du) < 0.5 and abs(dv) < 0.5:
+        return ""  # already aligned, leave it alone
+    return (f",lutyuv=y=clip(val{dy:+.2f}\\,16\\,235):"
+            f"u=clip(val{du:+.2f}\\,16\\,240):v=clip(val{dv:+.2f}\\,16\\,240)")
+
+
 def concat_pair(cfg, a, b, dst):
     """Join clip a + clip b into the ~10s master.
 
     - clip a: drop the first `trim_start` frames (the img2vid start glitch).
-    - clip b: drop frame 0 (it == a's last frame, b was generated from it) and
-      sharpen to match a -- the continuation clip drifts slightly soft, so a
-      light unsharp brings its detail back up to clip 1's level.
+    - clip b: drop frame 0 (it == a's last frame, b was generated from it), then
+      brightness/chroma-match its head to clip a's tail so the cut has no tonal
+      step (`clip2_color_match`). Any `clip2_sharpen` is applied AFTER the match;
+      it defaults off because a one-sided sharpen pops contrast at the seam --
+      crispness is handled symmetrically by the final upscale instead.
     """
     n = max(0, int(getattr(cfg, "trim_start", 0)))
     a_chain = f"[0:v]trim=start_frame={n},setpts=N/FRAME_RATE/TB[a]" if n > 0 \
         else "[0:v]setpts=N/FRAME_RATE/TB[a]"
     b_chain = "[1:v]trim=start_frame=1,setpts=N/FRAME_RATE/TB"
+    if getattr(cfg, "clip2_color_match", True):
+        b_chain += _seam_match_filter(cfg, a, b)
     if getattr(cfg, "clip2_sharpen", ""):
         b_chain += f",unsharp={cfg.clip2_sharpen}"
     b_chain += "[b]"

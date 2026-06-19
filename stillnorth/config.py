@@ -75,12 +75,44 @@ class Config:
         # clip drifts slightly soft). Empty clip2_sharpen disables sharpening.
         self.trim_start = max(0, int(self.raw.get("trim_start_frames", 3)))
         self.clip2_sharpen = str(self.raw.get("clip2_sharpen", "")).strip()
+        # clip2_color_match: measure the brightness/chroma the continuation clip
+        # drifts to (Wan re-exposes when seeded from a single still) and pull
+        # clip 2's head back onto clip 1's tail so the cut has no tonal step.
+        # This is the real seam fix; a one-sided unsharp only hid softness and
+        # actually popped contrast at the join.
+        self.clip2_color_match = bool(self.raw.get("clip2_color_match", True))
+        # native_overlap (default): seed clip 2 with clip 1's LAST `overlap_frames`
+        # real frames (camera embedding dropped) so Wan continues the actual motion
+        # -> no surge/color/speed/blur seam by construction. "single_frame" = old
+        # one-still i2v continuation (kept as fallback).
+        self.continuation_mode = str(
+            self.raw.get("continuation_mode", "native_overlap")).lower()
+        self.overlap_frames = max(1, int(self.raw.get("overlap_frames", 17)))
+        self.continuation_length = int(self.raw.get("continuation_length", 97))
+        self.continuation_drop_camera = bool(
+            self.raw.get("continuation_drop_camera", True))
         self.fps = int(self.raw["fps"])
         self.cq = int(self.raw["video_cq"])
         self.nvenc = bool(self.raw["nvenc"])
         self.denoise = self.raw["upscale_denoise"]
         self.sharp = self.raw["upscale_sharp"]
         self.grain = self.raw["upscale_grain"]
+
+        # final finisher: "esrgan" = real-detail Upscayl/Real-ESRGAN per-frame +
+        # progressive contrast/saturation de-drift + UHD crisp; "lanczos" = the
+        # cheap ffmpeg chain (fallback / no-GPU-upscaler box).
+        self.final_upscaler = str(self.raw.get("final_upscaler", "esrgan")).lower()
+        self.esrgan_bin = self.raw.get("esrgan_bin", "")
+        self.esrgan_models_dir = self.raw.get("esrgan_models_dir", "")
+        self.esrgan_model = self.raw.get("esrgan_model", "remacri-4x")
+        self.final_height = int(self.raw.get("final_height", 2160))
+        self.final_unsharp = self.raw.get("final_unsharp", "5:5:0.6:5:5:0.0")
+        self.final_grain = self.raw.get("final_grain", "alls=4:allf=t+u")
+        self.final_tdenoise = self.raw.get("final_temporal_denoise", "0:0:6:6")
+        self.final_cq = int(self.raw.get("final_cq", 17))
+        self.contrast_flatten = bool(self.raw.get("contrast_flatten", True))
+        self.contrast_boost = float(self.raw.get("contrast_target_boost", 1.05))
+        self.saturation_boost = float(self.raw.get("saturation_target_boost", 1.02))
 
         self.poses = self.motion["poses"]
         self.speed_by_pose = self.motion["speed_by_pose"]

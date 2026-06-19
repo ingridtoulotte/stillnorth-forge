@@ -4,8 +4,9 @@
 
 ```
 HTML prompts ─▶ FLUX.2 images ─▶ upscale ×2 ─▶ CLIP classify (A/B/C/D)
-   ─▶ Wan 2.2 clip 1 ─▶ last frame ─▶ upscale ×4 ─▶ Wan 2.2 clip 2 (continuation)
-   ─▶ concat into one ~10–11 s loop ─▶ final upscale ×4
+   ─▶ Wan 2.2 clip 1 ─▶ native-overlap continuation (clip 1's last 17 frames, camera dropped)
+   ─▶ gold overlap join (RGB colour-match + xfade over the overlap) ─▶ one seamless ~10 s loop
+   ─▶ ESRGAN finish (per-frame contrast de-drift ─▶ Real-ESRGAN super-res ─▶ UHD 2160p + crisp)
    ─▶ 🎞 Long-video assembler ─▶ randomised, faded 15 min … 12 h ambient compilations
 ```
 
@@ -38,13 +39,21 @@ A zero-shot **CLIP** classifier (mirrored from the project's `tsn_classify.py`, 
 
 All four are broad, realistic and loopable so a single prompt fits every image in its class. Edit them freely in **`config/motion_prompts.json`** — they are sent verbatim.
 
-**Two-clip continuation (default), tuned to be seamless.** Clip 1 picks a random camera move (`Pan Up/Left/Right`, `Zoom In/Out`); the continuation clip starts from clip 1's last frame, **forced to the same camera move + speed**, so motion stays consistent across the join. The two are concatenated (clip 2's duplicate first frame dropped). Three fixes make the seam invisible:
+**Native-overlap continuation (default `continuation_mode: native_overlap`).** The proven recipe — verified seamless across forest, snow, autumn-lake, green-coast, golden-mountain and marsh sources. Instead of seeding clip 2 from a single still (which gives Wan no motion context → surge, colour pop, speed jump, soft edges), the pipeline feeds **clip 1's last `overlap_frames` (17) real frames** into `WanCameraImageToVideo.start_image`. Wan masks those as *known* and generates the rest as a true continuation of their actual motion — **no surge / colour / speed / sharpness seam by construction**, in one generation.
 
-- `continuation_seed: native` (default) — seed clip 2 from the crisp **native** 832×480 last frame, not the ×4-lanczos one (Wan resizes the seed back to 832×480 anyway, so the upscale only round-trips a blur).
-- `clip2_sharpen` — a light unsharp on clip 2 only, because a video model continuing from a single still drifts slightly soft. Tuned so clip 2's detail matches clip 1 (measured clip-start vs clip-end variance-of-Laplacian ratio ≈ **1.01**, up from ≈ 0.36 unsharpened on the final master).
-- `trim_start_frames` (default 3) — drop the img2vid start glitch at the head of clip 1.
+- `continuation_drop_camera` (default on) — drop the camera embedding on the continuation so it pans at the *inherited* rate from the 17 known frames, not camera-on-top. Stops the over-pan that revealed soft, hallucinated edges (progressive edge-blur). This was the single fix that flattened revealed-edge sharpness over time.
+- **Gold overlap join** (`finish.gold_join`) — the continuation's first 17 frames *are* clip 1's last 17 (the known context), so they are an exact colour reference. Match the continuation to clip 1 per-channel (RGB **mean + std**), light unsharp, then `xfade` **across the overlap** → an invisible texture morph (the same content on both sides), not a stylistic crossfade.
+- `overlap_frames: 17` — `N + 3` divisible by 4 keeps clean latent groups.
+- **Do not chain** more than one continuation: a second continuation built on a continuation compounds Wan's drift → end-of-clip hallucination. One continuation = ~10 s; go longer via the assembler, not by chaining.
 
-> **Why not one long native pass?** This Wan **WanCameraEmbedding** workflow only animates ~81 frames (5 s). Forcing `length: 161` makes the camera move die out (or, for a zoom, ease back) after the first 5 s — the clip looks like it stalls/reverses at the midpoint. So `native_long` exists as a config toggle but defaults **false**; only enable it with a workflow that genuinely supports long native generation (e.g. a fun_camera long-length export).
+**ESRGAN finish (default `final_upscaler: esrgan`, `finish.esrgan_finish`).** Real detail, not the soft lanczos chain:
+
+1. **Per-frame contrast de-drift** (`contrast_flatten`, default on) — Wan drifts toward higher contrast/saturation over a continuation (a "neon" end). The finisher fits the linear **trend** of per-frame luma-std + saturation and corrects *against the trend* — gentle early, **stronger toward the end** — so the drift is removed while each frame keeps its natural variation. Target = clip 1's level × `contrast_target_boost` (1.05) / `saturation_target_boost` (1.02).
+2. **Real-ESRGAN** per-frame super-res via Upscayl (`esrgan_model: remacri-4x`), then scale to **UHD `final_height` (2160)** + crisp unsharp + light grain. Upscaling can't exceed the 832×480 generation res; for *more* native detail, generate Wan larger (slower) — the upscaler is at its ceiling.
+
+Set `final_upscaler: lanczos` to fall back to the cheap ffmpeg chain on a box without the Upscayl binary. `continuation_mode: single_frame` restores the old single-still continuation (`clip2_color_match`, `trim_start_frames`, `clip2_sharpen` apply only in that mode).
+
+> **Why not one long native pass?** This Wan **WanCameraEmbedding** workflow only animates ~81 frames (5 s). Forcing `length: 161` makes the camera move die out after the first 5 s — the clip stalls/reverses at the midpoint. So `native_long` defaults **false**; the overlap continuation is what extends to ~10 s cleanly.
 
 ---
 
@@ -94,6 +103,7 @@ The **Last done** card shows only the single most-recent artifact (latest image 
 - **ComfyUI** running locally with the two API-format workflows in `workflows/` working (FLUX.2 + Wan 2.2 14B LoRA stack). Default address `127.0.0.1:8188`.
 - **ffmpeg** (default `C:/ffmpeg/bin/ffmpeg.exe`). NVENC used by default; falls back to libx264 if you set `"nvenc": false`.
 - **For the classify stage only:** `pip install open_clip_torch pillow` into the same environment as ComfyUI (torch already lives there). Weights (~1.7 GB) download once.
+- **For the ESRGAN finish (default `final_upscaler: esrgan`):** [Upscayl](https://upscayl.org) (its bundled `upscayl-bin` + models) and `numpy`/`opencv-python` for the per-frame contrast de-drift. Point `esrgan_bin` / `esrgan_models_dir` at your install. If the binary is absent the finisher auto-falls back to the lanczos chain (set `final_upscaler: lanczos` to force it). **VideoHelperSuite** (`VHS_LoadVideoPath`) must be installed in ComfyUI for the native-overlap continuation to read clip 1's tail frames.
 
 ## Quick start
 
