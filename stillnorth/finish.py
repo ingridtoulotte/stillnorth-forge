@@ -133,49 +133,131 @@ def _match_offset(clip1, raw, n1, search):
     return best
 
 
-def _join_graph(cor, cut, fps, retime):
-    """Hard-cut concat: clip1 in full, then the continuation from frame `cut`
-    (its first genuinely new frame) colour-matched + optionally retimed to clip1's
-    motion speed. NO xfade -- cross-dissolving clip1's tail with Wan's re-rendered
-    copy of the same frames ghosted ~1s of motion (read as blur) and snapped at the
-    end (forward jump). The cut is continuous by construction (cut == the frame
-    after clip1's last), so a straight join is seamless once colour is matched."""
-    a = "[0:v]settb=AVTB,setpts=PTS-STARTPTS[a];"
-    if retime and abs(retime - 1.0) >= 1e-3:
-        b = (f"[1:v]{cor},trim=start_frame={cut},"
-             f"setpts=(PTS-STARTPTS)/{retime:.3f},fps={fps},"
-             f"settb=AVTB,setpts=PTS-STARTPTS[b];")
+def _read_all(path):
+    np, cv2 = _np_cv2()
+    cap = cv2.VideoCapture(path)
+    out = []
+    while True:
+        ok, fr = cap.read()
+        if not ok:
+            break
+        out.append(fr.astype(float))
+    cap.release()
+    return out
+
+
+def _dedrift_clip2(new, ref_bgr, box=None):
+    """Remove the continuation's per-channel brightness/colour DRIFT in place.
+
+    Wan's i2v continuation slowly darkens / shifts colour over its length, so a
+    single colour anchor at the seam can't hold it -> clip2 ends visibly darker and
+    'not natural'. Fit each channel's per-frame-mean trend and shift every frame so
+    the TREND sits on clip1's tail colour (ref_bgr), keeping each frame's own
+    deviation (natural variation, not a flat exposure clamp).
+
+    `box`=(x,y,w,h) measures the trend on the CENTRE region that survives the edge
+    crop (the part the viewer actually sees); the shift is applied to the whole
+    frame. Matching the visible region is what removes the 'clip2 looks darker'."""
+    np, _ = _np_cv2()
+    n = len(new)
+    if n < 2:
+        return new
+    if box:
+        x, y, bw, bh = box
+        roi = [f[y:y + bh, x:x + bw] for f in new]
     else:
-        b = (f"[1:v]{cor},trim=start_frame={cut},"
-             f"setpts=PTS-STARTPTS,settb=AVTB[b];")
-    return a + b + "[a][b]concat=n=2:v=1[o]"
+        roi = new
+    idx = np.arange(n)
+    means = np.array([[r[..., c].mean() for c in range(3)] for r in roi])
+    # quadratic, not linear: Wan's darkening accelerates toward the end, so a
+    # straight-line trend leaves the END below it (clip2 still ends darker). A
+    # degree-2 fit follows the curve and pins the whole clip to clip1's tail.
+    deg = 2 if n >= 5 else 1
+    for c in range(3):
+        trend = np.polyval(np.polyfit(idx, means[:, c], deg), idx)
+        for i in range(n):
+            new[i][..., c] = np.clip(new[i][..., c] + (ref_bgr[c] - trend[i]), 0, 255)
+    return new
+
+
+def _even(x):
+    x = int(round(x))
+    return x - (x % 2)
+
+
+def _resample_speed(frames, F):
+    """Uniformly resample `frames` to change speed by factor F (F>1 = faster =
+    fewer frames). Done in-memory by nearest-frame pick, NOT an ffmpeg setpts+fps
+    filter -- that resample dropped/duped a frame right at the concat boundary and
+    spiked the seam (made the speed step worse, not better)."""
+    n = len(frames)
+    if n < 2 or abs(F - 1.0) < 0.03:
+        return frames
+    tgt = max(2, int(round(n / F)))
+    return [frames[min(n - 1, int(round(i * F)))] for i in range(tgt)]
+
+
+def _join_graph(fps, js, cw, ch, cx, cy, w, h):
+    """Filter graph: clip1 (input 0) hard-cut to the de-drifted/resampled
+    continuation png sequence (input 1, already the right frames at the right
+    speed), clip2 sharpen, concat, then crop the hallucinated pan-revealed border
+    and scale back to full frame. NO xfade and NO mid-stream retime -- both caused
+    a boundary hiccup; the cut is continuous by construction."""
+    a = f"[0:v]fps={fps},settb=AVTB,setpts=PTS-STARTPTS[a];"
+    sh = f"unsharp=5:5:{js:.2f}:5:5:0.0," if js and js > 0 else ""
+    b = f"[1:v]{sh}fps={fps},settb=AVTB,setpts=PTS-STARTPTS[b];"
+    crop = (f"crop={cw}:{ch}:{cx}:{cy},scale={w}:{h}:flags=lanczos"
+            if (cw < w or ch < h) else f"scale={w}:{h}")
+    return a + b + f"[a][b]concat=n=2:v=1,{crop}[o]"
 
 
 def gold_join(cfg, clip1, raw, dst):
-    """clip1 + colour-matched/(retimed) continuation, hard-cut -> seamless ~10s."""
-    np, _ = _np_cv2()
+    """clip1 + de-drifted/colour-matched/speed-resampled continuation, hard-cut,
+    edge-cropped -> ~10s with no seam jump, speed step, edge grain or colour drift."""
+    np, cv2 = _np_cv2()
     ov = cfg.overlap_frames
-    n1 = _frame_count(clip1)
+    c1 = _read_all(clip1)
+    c2 = _read_all(raw)
+    if not c1 or not c2:
+        return False
+    n1 = len(c1)
+    h, w = c1[0].shape[:2]
     m = _match_offset(clip1, raw, n1, 2 * ov + 6)    # cont frame == clip1's last
     cut = m + 1                                       # first genuinely new frame
-    mlen = m + 1                                      # frames in the matched overlap
-    cm, cs = _rgb_stats(clip1, n1 - mlen, n1 - 1)     # clip1 tail (matched window)
-    om, osd = _rgb_stats(raw, 0, m)                   # continuation's copy of it
-    g = np.clip(cs / np.maximum(osd, 1e-3), 0.6, 1.7)
-    lut = (f"r=clip((val-{om[0]:.2f})*{g[0]:.3f}+{cm[0]:.2f}\\,0\\,255):"
-           f"g=clip((val-{om[1]:.2f})*{g[1]:.3f}+{cm[1]:.2f}\\,0\\,255):"
-           f"b=clip((val-{om[2]:.2f})*{g[2]:.3f}+{cm[2]:.2f}\\,0\\,255)")
-    cor = f"lutrgb={lut},unsharp=5:5:{cfg.join_sharpen:.2f}:5:5:0.0"
-    F = None
+    # edge crop dims (also the visible region for colour matching)
+    ec = float(getattr(cfg, "edge_crop", 0.0))
+    cw, ch = _even(w * (1 - 2 * ec)), _even(h * (1 - 2 * ec))
+    cx, cy = (w - cw) // 2, (h - ch) // 2
+    # clip1 tail colour reference, measured on the VISIBLE (post-crop) centre so
+    # clip2's visible brightness matches even as the camera moves content around.
+    K = min(8, n1)
+    ref_bgr = np.mean([f[cy:cy + ch, cx:cx + cw] for f in c1[-K:]], axis=(0, 1, 2))
+    new = c2[cut:]
+    if not new:
+        return False
+    if getattr(cfg, "clip2_dedrift", True):
+        new = _dedrift_clip2(new, ref_bgr, (cx, cy, cw, ch))
+    # speed: match clip1's BODY speed to clip2's BODY speed (both excluding the
+    # seam transient). Gentle, tightly clamped, applied by in-memory resample.
     if getattr(cfg, "continuation_speed_match", False):
-        f1 = _flow(clip1)              # clip1 = established motion speed
-        f2 = _flow(raw, cut)          # the NEW continuation frames
-        F = float(np.clip(f1 / max(f2, 1e-3), 0.7, 1.7))
-    fc = _join_graph(cor, cut, cfg.fps, F)
-    return _run([cfg.ffmpeg, "-y", "-loglevel", "error", "-i", clip1, "-i", raw,
-                 "-filter_complex", fc, "-map", "[o]", "-r", str(cfg.fps),
-                 "-c:v", "libx264", "-crf", "14", "-pix_fmt", "yuv420p", dst]) \
+        f1 = _flow(clip1, 4, n1 - 4)
+        f2 = _flow(raw, cut + 3, 10 ** 9)
+        F = float(np.clip(f1 / max(f2, 1e-3), 0.8, 1.25))
+        new = _resample_speed(new, F)
+    tmp = tempfile.mkdtemp(prefix="snf_join_")
+    try:
+        for i, f in enumerate(new):
+            cv2.imwrite(os.path.join(tmp, f"n{i:05d}.png"),
+                        np.clip(f, 0, 255).astype("uint8"))
+        fc = _join_graph(cfg.fps, cfg.join_sharpen, cw, ch, cx, cy, w, h)
+        return _run([cfg.ffmpeg, "-y", "-loglevel", "error",
+                     "-i", clip1, "-framerate", str(cfg.fps),
+                     "-i", os.path.join(tmp, "n%05d.png"),
+                     "-filter_complex", fc, "-map", "[o]", "-r", str(cfg.fps),
+                     "-c:v", "libx264", "-crf", "14", "-pix_fmt", "yuv420p", dst]) \
         and os.path.exists(dst)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _progressive_contrast(files, cfg):
@@ -249,6 +331,32 @@ def _global_stats_pngs(files, sample=16):
     return a.mean(axis=(0, 1, 2)), a.std(axis=(0, 1, 2))
 
 
+def _mean_saturation_video(path, sample=16):
+    np, cv2 = _np_cv2()
+    n = _frame_count(path) or 1
+    idx = set(int(round(x)) for x in np.linspace(0, max(0, n - 1), sample))
+    cap = cv2.VideoCapture(path)
+    i = 0
+    s = []
+    while True:
+        ok, fr = cap.read()
+        if not ok:
+            break
+        if i in idx:
+            s.append(float(cv2.cvtColor(fr, cv2.COLOR_BGR2HSV)[..., 1].mean()))
+        i += 1
+    cap.release()
+    return float(np.mean(s)) if s else 0.0
+
+
+def _mean_saturation_pngs(files, sample=16):
+    np, cv2 = _np_cv2()
+    step = max(1, len(files) // sample)
+    s = [float(cv2.cvtColor(cv2.imread(p), cv2.COLOR_BGR2HSV)[..., 1].mean())
+         for p in files[::step]]
+    return float(np.mean(s)) if s else 0.0
+
+
 def _norm_lut(src_m, src_sd, cur_m, cur_sd):
     """lutrgb that maps the CURRENT colour distribution back onto the SOURCE's
     per-channel mean+std (val' = (val-cur)*src_sd/cur_sd + src). remacri-4x punches
@@ -280,6 +388,8 @@ def esrgan_finish(cfg, src, dst):
         # source colour BEFORE the de-drift edits the input frames in place
         src_m, src_sd = (_global_stats_video(src)
                          if cfg.esrgan_color_match else (None, None))
+        src_sat = (_mean_saturation_video(src)
+                   if cfg.esrgan_saturation_match else None)
         if cfg.contrast_flatten:
             _progressive_contrast(files, cfg)
         if subprocess.run([cfg.esrgan_bin, "-i", inF, "-o", outF, "-n",
@@ -289,10 +399,16 @@ def esrgan_finish(cfg, src, dst):
                           stderr=subprocess.DEVNULL).returncode != 0:
             return False
         chain = []
+        sr_files = sorted(glob.glob(os.path.join(outF, "*.png")))
         if cfg.esrgan_color_match:
-            sr_files = sorted(glob.glob(os.path.join(outF, "*.png")))
             cur_m, cur_sd = _global_stats_pngs(sr_files)
             chain.append(_norm_lut(src_m, src_sd, cur_m, cur_sd))
+        if cfg.esrgan_saturation_match:
+            # remacri over-saturates ('neon'); pull HSV saturation back to the
+            # source clip's level (per-channel mean/std alone left a residual).
+            sr_sat = _mean_saturation_pngs(sr_files)
+            ssat = float(np.clip(src_sat / max(sr_sat, 1e-3), 0.55, 1.05))
+            chain.append(f"eq=saturation={ssat:.3f}")
         if cfg.final_tdenoise:
             chain.append(f"hqdn3d={cfg.final_tdenoise}")
         chain.append(f"scale=-2:{cfg.final_height}:flags=lanczos")

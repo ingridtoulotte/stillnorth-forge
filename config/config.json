@@ -31,6 +31,8 @@
   "continuation_drop_camera": true,
   "continuation_speed_match": true,
   "join_sharpen": 0.8,
+  "clip2_dedrift": true,
+  "edge_crop": 0.04,
 
   "fps": 16,
   "video_cq": 19,
@@ -52,6 +54,7 @@
   "contrast_target_boost": 1.0,
   "saturation_target_boost": 1.0,
   "esrgan_color_match": true,
+  "esrgan_saturation_match": true,
 
   "assembler": {
     "fade_seconds": 1.0,

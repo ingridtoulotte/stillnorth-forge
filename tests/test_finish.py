@@ -23,24 +23,50 @@ def test_speed_match_and_join_config_loads():
     c = Config()
     assert isinstance(c.continuation_speed_match, bool)
     assert isinstance(c.esrgan_color_match, bool)
+    assert isinstance(c.esrgan_saturation_match, bool)
+    assert isinstance(c.clip2_dedrift, bool)
     assert c.join_sharpen >= 0.0
+    assert 0.0 <= c.edge_crop < 0.2
 
 
-def test_join_graph_is_hard_cut_no_xfade():
-    # join is a straight concat at the true cut frame, never a cross-dissolve
-    for r in (None, 1.0, 1.0005):
-        g = finish._join_graph("CORR", cut=18, fps=16, retime=r)
-        assert "CORR" in g and "concat=n=2:v=1" in g
-        assert "xfade" not in g                       # no ghosting/jump source
-        assert "trim=start_frame=18" in g             # drop reproduced overlap
-        assert "(PTS-STARTPTS)/" not in g             # no retime when ratio ~1
+def test_join_graph_is_hard_cut_with_edge_crop():
+    # straight concat (never a cross-dissolve) + border crop scaled back to full
+    g = finish._join_graph(16, 0.8, 768, 448, 32, 16, 832, 480)
+    assert "concat=n=2:v=1" in g
+    assert "xfade" not in g                       # no ghosting/jump source
+    assert "setpts=(PTS-STARTPTS)/" not in g      # no mid-stream retime (seam hiccup)
+    assert "crop=768:448:32:16" in g              # drop hallucinated border
+    assert "scale=832:480" in g                   # back to full frame
+    assert "unsharp=5:5:0.80" in g                # clip2 sharpen
 
 
-def test_join_graph_retimes_new_frames_when_ratio_off():
-    g = finish._join_graph("CORR", cut=18, fps=16, retime=1.300)
-    assert "trim=start_frame=18" in g
-    assert "setpts=(PTS-STARTPTS)/1.300" in g
-    assert "concat=n=2:v=1" in g and "xfade" not in g
+def test_join_graph_no_crop_when_full_frame():
+    g = finish._join_graph(16, 0.8, 832, 480, 0, 0, 832, 480)
+    assert "crop=" not in g and "concat=n=2:v=1" in g
+
+
+def test_resample_speed_changes_frame_count():
+    frames = list(range(100))
+    assert finish._resample_speed(frames, 1.0) == frames        # no-op near 1
+    faster = finish._resample_speed(frames, 1.25)               # speed up -> fewer
+    assert 70 <= len(faster) <= 90 and faster[0] == 0
+    slower = finish._resample_speed(frames, 0.8)                # slow down -> more
+    assert len(slower) > 100
+
+
+def test_even_rounds_down_to_even():
+    assert finish._even(831) == 830 and finish._even(799.4) == 798
+
+
+def test_dedrift_removes_brightness_trend():
+    import numpy as np
+    # synth clip2 that darkens linearly; de-drift should pin it back to ref
+    ref = np.array([120.0, 120.0, 120.0])
+    new = [np.full((8, 8, 3), 120.0 - i * 5.0) for i in range(10)]  # 120 -> 75
+    out = finish._dedrift_clip2([f.copy() for f in new], ref)
+    means = [float(f.mean()) for f in out]
+    assert max(means) - min(means) < 6.0          # drift flattened
+    assert abs(float(np.mean(means)) - 120.0) < 4.0  # pinned near clip1 ref
 
 
 def test_norm_lut_pulls_toward_source():

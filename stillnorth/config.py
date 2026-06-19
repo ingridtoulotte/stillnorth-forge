@@ -102,6 +102,13 @@ class Config:
         # continuation drifts slightly soft vs clip1). The join is now a hard cut
         # (no xfade), so this is the only seam-side sharpening.
         self.join_sharpen = float(self.raw.get("join_sharpen", 0.8))
+        # clip2_dedrift: remove the continuation's per-channel brightness/colour
+        # drift (Wan i2v darkens over its length) by fitting each channel's trend
+        # and pinning it to clip1's tail colour -> clip2 no longer ends darker.
+        self.clip2_dedrift = bool(self.raw.get("clip2_dedrift", True))
+        # edge_crop: fraction trimmed off EACH side then scaled back, to drop the
+        # soft/grainy hallucinated border a pan reveals at the frame edges.
+        self.edge_crop = float(self.raw.get("edge_crop", 0.04))
         self.fps = int(self.raw["fps"])
         self.cq = int(self.raw["video_cq"])
         self.nvenc = bool(self.raw["nvenc"])
@@ -128,6 +135,10 @@ class Config:
         # distribution back onto the source clip (remacri-4x over-punches
         # contrast/saturation -> "neon"; this is what made only the 4k look off).
         self.esrgan_color_match = bool(self.raw.get("esrgan_color_match", True))
+        # esrgan_saturation_match: per-channel mean/std match left a residual neon;
+        # also pull HSV saturation back to the source clip's level after super-res.
+        self.esrgan_saturation_match = bool(
+            self.raw.get("esrgan_saturation_match", True))
 
         self.poses = self.motion["poses"]
         self.speed_by_pose = self.motion["speed_by_pose"]
