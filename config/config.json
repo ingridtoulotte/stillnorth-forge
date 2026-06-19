@@ -33,6 +33,7 @@
   "join_sharpen": 0.8,
   "clip2_dedrift": true,
   "edge_crop": 0.04,
+  "seam_blend_alpha": 0.35,
 
   "fps": 16,
   "video_cq": 19,

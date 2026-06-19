@@ -135,6 +135,22 @@ def test_match_seam_contrast_noop_when_matched():
     assert len(out) == len(flat)
 
 
+def test_ramp_toward_eases_from_orig_to_corrected():
+    import numpy as np
+    orig = [np.full((4, 4, 3), 100.0) for _ in range(5)]
+    corrected = [np.full((4, 4, 3), 200.0) for _ in range(5)]
+    out = finish._ramp_toward(orig, corrected)
+    means = [float(f.mean()) for f in out]
+    assert means[0] == 100.0           # first frame untouched
+    assert means[-1] == 200.0          # last frame fully corrected
+    assert means[0] < means[2] < means[-1]   # monotonic ease, no jump
+
+
+def test_seam_blend_alpha_config_default():
+    c = Config()
+    assert 0.0 <= c.seam_blend_alpha <= 1.0
+
+
 def test_esrgan_available_false_when_missing(tmp_path):
     c = SimpleNamespace(esrgan_bin=str(tmp_path / "nope.exe"),
                         esrgan_models_dir=str(tmp_path))

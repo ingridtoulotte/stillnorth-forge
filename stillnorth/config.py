@@ -109,6 +109,12 @@ class Config:
         # edge_crop: fraction trimmed off EACH side then scaled back, to drop the
         # soft/grainy hallucinated border a pan reveals at the frame edges.
         self.edge_crop = float(self.raw.get("edge_crop", 0.04))
+        # seam_blend_alpha: how far the contrast/sat/sharp seam TARGET sits from
+        # clip1 (0.0) toward clip2 (1.0). 1.0 = old behaviour (clip2 pulled all
+        # the way to clip1, clip1 untouched -- reads as one half "fixed" and one
+        # not). <1.0 meets in the middle: clip2 gets a smaller correction and
+        # clip1's own last frames ease toward the same shared target.
+        self.seam_blend_alpha = float(self.raw.get("seam_blend_alpha", 0.35))
         self.fps = int(self.raw["fps"])
         self.cq = int(self.raw["video_cq"])
         self.nvenc = bool(self.raw["nvenc"])

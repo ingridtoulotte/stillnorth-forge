@@ -273,6 +273,18 @@ def _match_seam_contrast(new, ref_con, ref_sat, box, K=8):
     return out
 
 
+def _ramp_toward(orig, corrected):
+    """Cross-fade `orig` into `corrected` along a 0->1 ramp across the list --
+    a smooth ease, not a cut, so retouching clip1's own tail doesn't introduce
+    a second internal seam. Weight 1.0 only lands on the very last frame."""
+    np, _ = _np_cv2()
+    n = len(orig)
+    if n == 0:
+        return orig
+    w = np.linspace(0.0, 1.0, n)
+    return [np.clip((1 - wi) * o + wi * c, 0, 255) for o, c, wi in zip(orig, corrected, w)]
+
+
 def _even(x):
     x = int(round(x))
     return x - (x % 2)
@@ -306,7 +318,15 @@ def _join_graph(fps, js, cw, ch, cx, cy, w, h):
 
 def gold_join(cfg, clip1, raw, dst):
     """clip1 + de-drifted/colour-matched/speed-resampled continuation, hard-cut,
-    edge-cropped -> ~10s with no seam jump, speed step, edge grain or colour drift."""
+    edge-cropped -> ~10s with no seam jump, speed step, edge grain or colour drift.
+
+    Contrast/saturation/sharpness meet in the MIDDLE: a fixed full-strength
+    match-clip2-to-clip1 made clip2 look like the one being 'fixed' and clip1
+    untouched -- asymmetric, reads as one half corrected and one half not.
+    Blend the target toward clip2 by `seam_blend_alpha` (clip2 gets LESS
+    correction) and ease clip1's own last few frames toward that same target
+    (clip1 gets a SMALL nudge), so both halves move toward a shared midpoint
+    instead of clip2 alone being pulled all the way to clip1."""
     np, cv2 = _np_cv2()
     ov = cfg.overlap_frames
     c1 = _read_all(clip1)
@@ -321,17 +341,28 @@ def gold_join(cfg, clip1, raw, dst):
     ec = float(getattr(cfg, "edge_crop", 0.0))
     cw, ch = _even(w * (1 - 2 * ec)), _even(h * (1 - 2 * ec))
     cx, cy = (w - cw) // 2, (h - ch) // 2
+    box = (cx, cy, cw, ch)
     # clip1 tail colour reference, measured on the VISIBLE (post-crop) centre so
     # clip2's visible brightness matches even as the camera moves content around.
     K = min(8, n1)
+    TAIL = min(n1, max(16, 2 * K))   # window of clip1's own last frames to ease
     ref_bgr = np.mean([f[cy:cy + ch, cx:cx + cw] for f in c1[-K:]], axis=(0, 1, 2))
     new = c2[cut:]
     if not new:
         return False
+    alpha = float(getattr(cfg, "seam_blend_alpha", 1.0))  # 1.0 = old full-match behaviour
+    c1_tail = [f.copy() for f in c1[-TAIL:]]
     if getattr(cfg, "clip2_dedrift", True):
-        new = _dedrift_clip2(new, ref_bgr, (cx, cy, cw, ch))
-        ref_con, ref_sat = _contrast_sat(c1[-K:], (cx, cy, cw, ch))
-        new = _match_seam_contrast(new, ref_con, ref_sat, (cx, cy, cw, ch))
+        new = _dedrift_clip2(new, ref_bgr, box)
+        ref_con, ref_sat = _contrast_sat(c1[-K:], box)
+        cur_con, cur_sat = _contrast_sat(new[:K], box)
+        T_con = ref_con + alpha * (cur_con - ref_con)
+        T_sat = ref_sat + alpha * (cur_sat - ref_sat)
+        new = _match_seam_contrast(new, T_con, T_sat, box)
+        if alpha < 0.999:
+            tail_corr = _match_seam_contrast([f.copy() for f in c1_tail],
+                                              T_con, T_sat, box, K=TAIL)
+            c1_tail = _ramp_toward(c1_tail, tail_corr)
     # speed: match clip1's BODY speed to clip2's BODY speed (both excluding the
     # seam transient). Gentle, tightly clamped, applied by in-memory resample.
     if getattr(cfg, "continuation_speed_match", False):
@@ -340,17 +371,27 @@ def gold_join(cfg, clip1, raw, dst):
         F = float(np.clip(f1 / max(f2, 1e-3), 0.8, 1.25))
         new = _resample_speed(new, F)
     if getattr(cfg, "clip2_dedrift", True):
-        ref_sharp = _sharp_metric(c1[-K:], (cx, cy, cw, ch))
-        new = _match_seam_sharpness(new, ref_sharp, (cx, cy, cw, ch))
+        ref_sharp = _sharp_metric(c1_tail[-K:], box)
+        cur_sharp = _sharp_metric(new[:K], box)
+        T_sharp = ref_sharp + alpha * (cur_sharp - ref_sharp)
+        new = _match_seam_sharpness(new, T_sharp, box)
+        if alpha < 0.999:
+            tail_corr = _match_seam_sharpness([f.copy() for f in c1_tail],
+                                               T_sharp, box, K=TAIL)
+            c1_tail = _ramp_toward(c1_tail, tail_corr)
+    c1_mod = c1[:-TAIL] + c1_tail
     tmp = tempfile.mkdtemp(prefix="snf_join_")
     try:
+        for i, f in enumerate(c1_mod):
+            cv2.imwrite(os.path.join(tmp, f"c{i:05d}.png"),
+                        np.clip(f, 0, 255).astype("uint8"))
         for i, f in enumerate(new):
             cv2.imwrite(os.path.join(tmp, f"n{i:05d}.png"),
                         np.clip(f, 0, 255).astype("uint8"))
         fc = _join_graph(cfg.fps, cfg.join_sharpen, cw, ch, cx, cy, w, h)
         return _run([cfg.ffmpeg, "-y", "-loglevel", "error",
-                     "-i", clip1, "-framerate", str(cfg.fps),
-                     "-i", os.path.join(tmp, "n%05d.png"),
+                     "-framerate", str(cfg.fps), "-i", os.path.join(tmp, "c%05d.png"),
+                     "-framerate", str(cfg.fps), "-i", os.path.join(tmp, "n%05d.png"),
                      "-filter_complex", fc, "-map", "[o]", "-r", str(cfg.fps),
                      "-c:v", "libx264", "-crf", "14", "-pix_fmt", "yuv420p", dst]) \
         and os.path.exists(dst)
