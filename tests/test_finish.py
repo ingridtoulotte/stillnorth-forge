@@ -91,6 +91,29 @@ def test_codec_switch():
     assert "libx264" in b and "14" in b
 
 
+def test_match_seam_sharpness_blurs_grainy_clip2():
+    import numpy as np
+    rng = np.random.default_rng(0)
+    grainy = [np.full((40, 40, 3), 120.0) + rng.normal(0, 25, (40, 40, 3)) for _ in range(8)]
+    box = (0, 0, 40, 40)
+    ref_sharp = 50.0   # clip1's tail is much smoother than this noisy clip2
+    out = finish._match_seam_sharpness([f.copy() for f in grainy], ref_sharp, box)
+    assert finish._sharp_metric(out, box) < finish._sharp_metric(grainy, box)
+
+
+def test_match_seam_sharpness_noop_when_already_matched():
+    import numpy as np
+    flat = [np.full((20, 20, 3), 100.0) for _ in range(4)]
+    out = finish._match_seam_sharpness([f.copy() for f in flat], 0.0, (0, 0, 20, 20))
+    assert len(out) == len(flat)
+
+
+def test_join_graph_sharpens_both_sides_evenly():
+    # old bug: unsharp only on clip2 [b], amplifying its grain mismatch vs clip1
+    g = finish._join_graph(16, 0.8, 832, 480, 0, 0, 832, 480)
+    assert g.count("unsharp=5:5:0.80") == 2
+
+
 def test_esrgan_available_false_when_missing(tmp_path):
     c = SimpleNamespace(esrgan_bin=str(tmp_path / "nope.exe"),
                         esrgan_models_dir=str(tmp_path))

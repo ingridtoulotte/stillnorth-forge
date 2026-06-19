@@ -180,6 +180,46 @@ def _dedrift_clip2(new, ref_bgr, box=None):
     return new
 
 
+def _sharp_metric(frames, box):
+    """Mean Laplacian variance over the visible (post-crop) region -- texture/
+    grain level, independent of colour. Used to detect a seam grain mismatch."""
+    np, cv2 = _np_cv2()
+    if not frames:
+        return 0.0
+    x, y, w, h = box
+    vals = []
+    for f in frames:
+        roi = np.clip(f[y:y + h, x:x + w], 0, 255).astype("uint8")
+        g = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        vals.append(cv2.Laplacian(g, cv2.CV_64F).var())
+    return float(np.mean(vals))
+
+
+def _match_seam_sharpness(new, ref_sharp, box, K=8):
+    """clip2's raw continuation is consistently grainier than clip1's diffused
+    tail (measured 7-10x higher Laplacian variance at the cut) -- a hard cut
+    between the two reads as a 'blur to sharp' / contrast jump even though
+    colour is already matched. Blur clip2 down toward clip1's texture level
+    (or sharpen it up, if it's the softer one) so the cut is a colour-only
+    transition, not a texture-level one too."""
+    np, cv2 = _np_cv2()
+    cur = _sharp_metric(new[:min(K, len(new))], box)
+    if cur <= 1e-3 or ref_sharp <= 1e-3:
+        return new
+    ratio = cur / ref_sharp
+    if ratio > 1.15:
+        sigma = float(np.clip((ratio - 1.0) * 1.5, 0.3, 2.5))
+        return [cv2.GaussianBlur(f, (0, 0), sigma) for f in new]
+    if ratio < 0.85:
+        amt = float(np.clip((1.0 - ratio) * 1.5, 0.1, 1.0))
+        out = []
+        for f in new:
+            blur = cv2.GaussianBlur(f, (0, 0), 3)
+            out.append(np.clip(f + (f - blur) * amt, 0, 255))
+        return out
+    return new
+
+
 def _even(x):
     x = int(round(x))
     return x - (x % 2)
@@ -203,8 +243,8 @@ def _join_graph(fps, js, cw, ch, cx, cy, w, h):
     speed), clip2 sharpen, concat, then crop the hallucinated pan-revealed border
     and scale back to full frame. NO xfade and NO mid-stream retime -- both caused
     a boundary hiccup; the cut is continuous by construction."""
-    a = f"[0:v]fps={fps},settb=AVTB,setpts=PTS-STARTPTS[a];"
     sh = f"unsharp=5:5:{js:.2f}:5:5:0.0," if js and js > 0 else ""
+    a = f"[0:v]{sh}fps={fps},settb=AVTB,setpts=PTS-STARTPTS[a];"
     b = f"[1:v]{sh}fps={fps},settb=AVTB,setpts=PTS-STARTPTS[b];"
     crop = (f"crop={cw}:{ch}:{cx}:{cy},scale={w}:{h}:flags=lanczos"
             if (cw < w or ch < h) else f"scale={w}:{h}")
@@ -244,6 +284,9 @@ def gold_join(cfg, clip1, raw, dst):
         f2 = _flow(raw, cut + 3, 10 ** 9)
         F = float(np.clip(f1 / max(f2, 1e-3), 0.8, 1.25))
         new = _resample_speed(new, F)
+    if getattr(cfg, "clip2_dedrift", True):
+        ref_sharp = _sharp_metric(c1[-K:], (cx, cy, cw, ch))
+        new = _match_seam_sharpness(new, ref_sharp, (cx, cy, cw, ch))
     tmp = tempfile.mkdtemp(prefix="snf_join_")
     try:
         for i, f in enumerate(new):
