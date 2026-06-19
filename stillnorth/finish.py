@@ -234,6 +234,45 @@ def _match_seam_sharpness(new, ref_sharp, box, K=8):
     return [np.clip(f + (f - cv2.GaussianBlur(f, (0, 0), 3)) * amt, 0, 255) for f in new]
 
 
+def _contrast_sat(frames, box):
+    """Mean (luma std, HSV saturation mean) over the visible region -- the
+    same two numbers Wan's continuation pass consistently overshoots on."""
+    np, cv2 = _np_cv2()
+    x, y, w, h = box
+    cons, sats = [], []
+    for f in frames:
+        roi = np.clip(f[y:y + h, x:x + w], 0, 255).astype("uint8")
+        cons.append(float(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY).std()))
+        sats.append(float(cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)[..., 1].mean()))
+    return float(np.mean(cons)) if cons else 0.0, float(np.mean(sats)) if sats else 0.0
+
+
+def _match_seam_contrast(new, ref_con, ref_sat, box, K=8):
+    """clip2's continuation pass is consistently 13-22% punchier (contrast
+    AND saturation) than clip1's tail, measured across multiple sources --
+    not a config setting, the model itself overshoots on the second pass.
+    Contrast/saturation scale linearly (unlike blur), so a direct ratio
+    works without a search."""
+    np, cv2 = _np_cv2()
+    sample = new[:min(K, len(new))]
+    cur_con, cur_sat = _contrast_sat(sample, box)
+    k_con = float(np.clip(ref_con / max(cur_con, 1e-3), 0.5, 1.0)) if ref_con > 0 else 1.0
+    k_sat = float(np.clip(ref_sat / max(cur_sat, 1e-3), 0.5, 1.0)) if ref_sat > 0 else 1.0
+    if abs(k_con - 1.0) < 0.03 and abs(k_sat - 1.0) < 0.03:
+        return new
+    out = []
+    for f in new:
+        g = f[..., 0] * 0.114 + f[..., 1] * 0.587 + f[..., 2] * 0.299
+        m = g.mean()
+        f2 = np.clip(m + (f - m) * k_con, 0, 255) if abs(k_con - 1.0) >= 0.03 else f
+        if abs(k_sat - 1.0) >= 0.03:
+            hsv = cv2.cvtColor(np.clip(f2, 0, 255).astype("uint8"), cv2.COLOR_BGR2HSV).astype(float)
+            hsv[..., 1] = np.clip(hsv[..., 1] * k_sat, 0, 255)
+            f2 = cv2.cvtColor(np.clip(hsv, 0, 255).astype("uint8"), cv2.COLOR_HSV2BGR).astype(float)
+        out.append(f2)
+    return out
+
+
 def _even(x):
     x = int(round(x))
     return x - (x % 2)
@@ -291,6 +330,8 @@ def gold_join(cfg, clip1, raw, dst):
         return False
     if getattr(cfg, "clip2_dedrift", True):
         new = _dedrift_clip2(new, ref_bgr, (cx, cy, cw, ch))
+        ref_con, ref_sat = _contrast_sat(c1[-K:], (cx, cy, cw, ch))
+        new = _match_seam_contrast(new, ref_con, ref_sat, (cx, cy, cw, ch))
     # speed: match clip1's BODY speed to clip2's BODY speed (both excluding the
     # seam transient). Gentle, tightly clamped, applied by in-memory resample.
     if getattr(cfg, "continuation_speed_match", False):

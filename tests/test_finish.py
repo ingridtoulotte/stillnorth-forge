@@ -114,6 +114,27 @@ def test_join_graph_sharpens_both_sides_evenly():
     assert g.count("unsharp=5:5:0.80") == 2
 
 
+def test_match_seam_contrast_pulls_punchy_clip2_down():
+    import numpy as np
+    rng = np.random.default_rng(1)
+    base = 110.0 + rng.normal(0, 35, (30, 30, 3))   # punchy: bigger spread than ref
+    punchy = [np.clip(base + rng.normal(0, 3, (30, 30, 3)), 0, 255) for _ in range(8)]
+    box = (0, 0, 30, 30)
+    ref_con, ref_sat = finish._contrast_sat(punchy, box)
+    softer = [f * 0.6 + 50 for f in punchy]          # the "clip1 tail" reference
+    soft_con, soft_sat = finish._contrast_sat(softer, box)
+    out = finish._match_seam_contrast([f.copy() for f in punchy], soft_con, soft_sat, box)
+    out_con, out_sat = finish._contrast_sat(out, box)
+    assert out_con < ref_con
+
+
+def test_match_seam_contrast_noop_when_matched():
+    import numpy as np
+    flat = [np.full((20, 20, 3), 100.0) for _ in range(4)]
+    out = finish._match_seam_contrast([f.copy() for f in flat], 0.0, 0.0, (0, 0, 20, 20))
+    assert len(out) == len(flat)
+
+
 def test_esrgan_available_false_when_missing(tmp_path):
     c = SimpleNamespace(esrgan_bin=str(tmp_path / "nope.exe"),
                         esrgan_models_dir=str(tmp_path))
