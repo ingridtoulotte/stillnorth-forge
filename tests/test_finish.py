@@ -12,10 +12,35 @@ def test_recipe_config_defaults():
     assert c.overlap_frames >= 1
     assert c.continuation_length >= c.overlap_frames
     assert isinstance(c.continuation_drop_camera, bool)
+    assert isinstance(c.continuation_speed_match, bool)
     assert c.final_upscaler in ("esrgan", "lanczos")
     assert c.final_height >= 720
     assert 1.0 <= c.contrast_boost <= 1.5
     assert 1.0 <= c.saturation_boost <= 1.5
+
+
+def test_speed_match_config_loads():
+    c = Config()
+    assert isinstance(c.continuation_speed_match, bool)
+
+
+def test_join_graph_plain_when_no_retime():
+    # retime None or ~1.0 -> simple colour-correct + xfade, no split/retime nodes
+    for r in (None, 1.0, 1.0005):
+        g = finish._join_graph("CORR", ov=17, n1=81, fps=16, retime=r)
+        assert "CORR" in g and "xfade=transition=fade" in g
+        assert "split" not in g and "trim=" not in g
+        assert "offset=4.0000" in g and "duration=1.0625" in g  # (81-17)/16, 17/16
+
+
+def test_join_graph_retimes_only_new_frames():
+    g = finish._join_graph("CORR", ov=17, n1=81, fps=16, retime=1.300)
+    # overlap kept at native rate; ONLY the post-overlap frames time-stretched by 1/F
+    assert "trim=end_frame=17" in g          # the overlap segment
+    assert "trim=start_frame=17" in g        # the new segment
+    assert "setpts=(PTS-STARTPTS)/1.300" in g
+    assert "settb=AVTB" in g and "concat=n=2:v=1" in g
+    assert "xfade=transition=fade:duration=1.0625:offset=4.0000" in g
 
 
 def test_wan_workflow_has_continuation_nodes():

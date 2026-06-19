@@ -4,8 +4,9 @@ This is the proven "The Still North" recipe, verified across 6 sources:
   - GOLD JOIN: the continuation's first `overlap` frames are the SAME content as
     clip 1's last `overlap` frames (Wan reproduced them as known context), so they
     are an exact colour reference. Match the continuation to clip 1 (per-channel
-    RGB mean+std), light unsharp, then xfade ACROSS the overlap -> invisible morph
-    (not a content fade).
+    RGB mean+std), light unsharp, retime the NEW frames to clip 1's motion speed
+    (Farneback optical-flow ratio), then xfade ACROSS the overlap -> invisible
+    morph (not a content fade), no colour/speed step.
   - FINISH: per-frame progressive contrast+saturation de-drift (Wan drifts toward
     higher contrast over a continuation -> "neon end"; corrected against the linear
     trend, gentle early / stronger late, keeping natural variation), then
@@ -62,8 +63,58 @@ def _rgb_stats(path, lo, hi):
     return a.mean(axis=(0, 1, 2)), a.std(axis=(0, 1, 2))
 
 
+def _flow(path, lo=0, hi=10 ** 9):
+    """Mean Farneback optical-flow magnitude over frames [lo, hi] = motion speed.
+    Downscaled to 416x240 for speed. Sharpness-independent, unlike a frame diff,
+    so it measures real movement not texture."""
+    np, cv2 = _np_cv2()
+    cap = cv2.VideoCapture(path)
+    i = 0
+    prev = None
+    mags = []
+    while True:
+        ok, fr = cap.read()
+        if not ok:
+            break
+        if lo <= i <= hi:
+            g = cv2.cvtColor(cv2.resize(fr, (416, 240)), cv2.COLOR_BGR2GRAY)
+            if prev is not None:
+                fl = cv2.calcOpticalFlowFarneback(
+                    prev, g, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+                mags.append(float(np.sqrt(fl[..., 0] ** 2 + fl[..., 1] ** 2).mean()))
+            prev = g
+        if i > hi:
+            break
+        i += 1
+    cap.release()
+    return float(sum(mags) / len(mags)) if mags else 0.0
+
+
+def _join_graph(cor, ov, n1, fps, retime):
+    """Build the xfade filter_complex.
+
+    retime is None / ~1.0  -> plain: colour-correct clip2, xfade across the overlap.
+    retime is a flow ratio F -> split the corrected continuation: keep the `ov`
+    overlap frames at native rate (they ARE clip1's frames, must line up for the
+    morph) and time-stretch ONLY the new frames by 1/F so clip2's motion speed
+    matches clip1, then concat + xfade across the overlap. settb=AVTB pins a
+    common timebase so the split/retime/concat stays frame-accurate."""
+    dur = ov / fps
+    off = (n1 - ov) / fps
+    if not retime or abs(retime - 1.0) < 1e-3:
+        return (f"[1:v]{cor},setpts=PTS-STARTPTS[b];"
+                f"[0:v][b]xfade=transition=fade:"
+                f"duration={dur:.4f}:offset={off:.4f}[o]")
+    return (f"[0:v]settb=AVTB,setpts=PTS-STARTPTS[a];"
+            f"[1:v]{cor}[cc];[cc]split[s0][s1];"
+            f"[s0]trim=end_frame={ov},setpts=PTS-STARTPTS[ovl];"
+            f"[s1]trim=start_frame={ov},setpts=(PTS-STARTPTS)/{retime:.3f}[nw];"
+            f"[ovl][nw]concat=n=2:v=1,fps={fps},settb=AVTB,setpts=PTS-STARTPTS[b];"
+            f"[a][b]xfade=transition=fade:duration={dur:.4f}:offset={off:.4f}[o]")
+
+
 def gold_join(cfg, clip1, raw, dst):
-    """clip1 + overlap-matched/xfaded continuation -> seamless ~10s native clip."""
+    """clip1 + overlap-matched/(retimed)/xfaded continuation -> seamless ~10s clip."""
     np, _ = _np_cv2()
     ov = cfg.overlap_frames
     n1 = _frame_count(clip1)
@@ -74,10 +125,12 @@ def gold_join(cfg, clip1, raw, dst):
            f"g=clip((val-{om[1]:.2f})*{g[1]:.3f}+{cm[1]:.2f}\\,0\\,255):"
            f"b=clip((val-{om[2]:.2f})*{g[2]:.3f}+{cm[2]:.2f}\\,0\\,255)")
     cor = f"lutrgb={lut},unsharp=5:5:0.5:5:5:0.0"
-    dur = ov / cfg.fps
-    off = (n1 - ov) / cfg.fps
-    fc = (f"[1:v]{cor},setpts=PTS-STARTPTS[b];"
-          f"[0:v][b]xfade=transition=fade:duration={dur:.4f}:offset={off:.4f}[o]")
+    F = None
+    if getattr(cfg, "continuation_speed_match", False):
+        f1 = _flow(clip1)              # clip1 = established motion speed
+        f2 = _flow(raw, ov)           # continuation AFTER the overlap = new frames
+        F = float(np.clip(f1 / max(f2, 1e-3), 0.7, 1.7))
+    fc = _join_graph(cor, ov, n1, cfg.fps, F)
     return _run([cfg.ffmpeg, "-y", "-loglevel", "error", "-i", clip1, "-i", raw,
                  "-filter_complex", fc, "-map", "[o]", "-r", str(cfg.fps),
                  "-c:v", "libx264", "-crf", "14", "-pix_fmt", "yuv420p", dst]) \

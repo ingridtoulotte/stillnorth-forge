@@ -91,6 +91,13 @@ class Config:
         self.continuation_length = int(self.raw.get("continuation_length", 97))
         self.continuation_drop_camera = bool(
             self.raw.get("continuation_drop_camera", True))
+        # continuation_speed_match: Wan's continuation drifts slightly slower than
+        # clip 1 (flow ratio ~0.73-0.95). Measure both halves' Farneback optical
+        # flow and time-stretch only the NEW continuation frames so clip2's motion
+        # speed matches clip1 -> no speed step at the seam. Frame-diff would be
+        # confounded by sharpness; optical flow is not.
+        self.continuation_speed_match = bool(
+            self.raw.get("continuation_speed_match", True))
         self.fps = int(self.raw["fps"])
         self.cq = int(self.raw["video_cq"])
         self.nvenc = bool(self.raw["nvenc"])
