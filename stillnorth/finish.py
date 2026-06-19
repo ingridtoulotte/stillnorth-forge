@@ -197,27 +197,41 @@ def _sharp_metric(frames, box):
 
 def _match_seam_sharpness(new, ref_sharp, box, K=8):
     """clip2's raw continuation is consistently grainier than clip1's diffused
-    tail (measured 7-10x higher Laplacian variance at the cut) -- a hard cut
-    between the two reads as a 'blur to sharp' / contrast jump even though
-    colour is already matched. Blur clip2 down toward clip1's texture level
-    (or sharpen it up, if it's the softer one) so the cut is a colour-only
-    transition, not a texture-level one too."""
+    tail at the cut -- a hard cut between the two reads as a 'blur to sharp' /
+    contrast jump even though colour is already matched. Blur clip2 down
+    toward clip1's texture level (or sharpen it up, if it's the softer one)
+    so the cut is a colour-only transition, not a texture-level one too.
+
+    Laplacian variance falls off non-linearly with Gaussian blur sigma (and
+    rises non-linearly with unsharp amount), so a fixed formula overshoots
+    badly at large mismatches -- binary-search the actual parameter against
+    the measured effect instead of guessing it."""
     np, cv2 = _np_cv2()
-    cur = _sharp_metric(new[:min(K, len(new))], box)
+    sample = new[:min(K, len(new))]
+    cur = _sharp_metric(sample, box)
     if cur <= 1e-3 or ref_sharp <= 1e-3:
         return new
     ratio = cur / ref_sharp
+    if 0.85 <= ratio <= 1.15:
+        return new
     if ratio > 1.15:
-        sigma = float(np.clip((ratio - 1.0) * 1.5, 0.3, 2.5))
-        return [cv2.GaussianBlur(f, (0, 0), sigma) for f in new]
-    if ratio < 0.85:
-        amt = float(np.clip((1.0 - ratio) * 1.5, 0.1, 1.0))
-        out = []
-        for f in new:
-            blur = cv2.GaussianBlur(f, (0, 0), 3)
-            out.append(np.clip(f + (f - blur) * amt, 0, 255))
-        return out
-    return new
+        lo, hi = 0.0, 6.0
+        for _ in range(10):
+            mid = (lo + hi) / 2
+            test = [cv2.GaussianBlur(f, (0, 0), mid) for f in sample]
+            (lo, hi) = (mid, hi) if _sharp_metric(test, box) > ref_sharp else (lo, mid)
+        sigma = hi
+        return [cv2.GaussianBlur(f, (0, 0), sigma) for f in new] if sigma > 0.05 else new
+    lo, hi = 0.0, 3.0
+    for _ in range(10):
+        mid = (lo + hi) / 2
+        test = [np.clip(f + (f - cv2.GaussianBlur(f, (0, 0), 3)) * mid, 0, 255)
+                for f in sample]
+        (lo, hi) = (mid, hi) if _sharp_metric(test, box) < ref_sharp else (lo, mid)
+    amt = hi
+    if amt <= 0.02:
+        return new
+    return [np.clip(f + (f - cv2.GaussianBlur(f, (0, 0), 3)) * amt, 0, 255) for f in new]
 
 
 def _even(x):
