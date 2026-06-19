@@ -196,22 +196,26 @@ class Pipeline:
             return self.start()
         return False
 
+    def _active_stages(self):
+        """Producing stages that actually run in the current mode, in order.
+        native_overlap + native_long both skip the still-seed stages."""
+        if self.cfg.native_long:
+            return ["img_up", "vid1", "concat", "final_up"]
+        if self.cfg.continuation_mode == "native_overlap":
+            return ["img_up", "vid1", "vid2", "concat", "final_up"]
+        return ["img_up", "vid1", "lastframe", "lf_up", "vid2", "concat", "final_up"]
+
     def _pending_work(self):
-        """True if any stage still has an item to render (drives auto-resume)."""
+        """True if any stage still has an item to render (drives auto-resume).
+        Walks only the ACTIVE stages so skipped ones never read as 'pending'."""
         if any(not self._exists("flux", k) for k in self.prompts):
             return True
-        stages = ["img_up", "vid1", "concat", "final_up"] if self.cfg.native_long \
-            else ["img_up", "vid1", "lastframe", "lf_up", "vid2", "concat", "final_up"]
-        for stage in stages:
-            if self._count(stage) < self._count_prev(stage):
+        prev = self._count("flux")
+        for stage in self._active_stages():
+            if self._count(stage) < prev:
                 return True
+            prev = self._count(stage)
         return self._count("final_up") < len(self.prompts)
-
-    def _count_prev(self, stage):
-        order = ["flux", "img_up", "classify", "vid1", "lastframe",
-                 "lf_up", "vid2", "concat", "final_up"]
-        i = order.index(stage)
-        return self._count(order[i - 1]) if i > 0 else len(self.prompts)
 
     def cancel(self):
         """Pause: stop after the current item; rendered files are kept so a
