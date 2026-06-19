@@ -98,6 +98,10 @@ class Config:
         # confounded by sharpness; optical flow is not.
         self.continuation_speed_match = bool(
             self.raw.get("continuation_speed_match", True))
+        # join_sharpen: unsharp amount applied to clip2 at the join (the
+        # continuation drifts slightly soft vs clip1). The join is now a hard cut
+        # (no xfade), so this is the only seam-side sharpening.
+        self.join_sharpen = float(self.raw.get("join_sharpen", 0.8))
         self.fps = int(self.raw["fps"])
         self.cq = int(self.raw["video_cq"])
         self.nvenc = bool(self.raw["nvenc"])
@@ -118,8 +122,12 @@ class Config:
         self.final_tdenoise = self.raw.get("final_temporal_denoise", "0:0:6:6")
         self.final_cq = int(self.raw.get("final_cq", 17))
         self.contrast_flatten = bool(self.raw.get("contrast_flatten", True))
-        self.contrast_boost = float(self.raw.get("contrast_target_boost", 1.05))
-        self.saturation_boost = float(self.raw.get("saturation_target_boost", 1.02))
+        self.contrast_boost = float(self.raw.get("contrast_target_boost", 1.0))
+        self.saturation_boost = float(self.raw.get("saturation_target_boost", 1.0))
+        # esrgan_color_match: after super-res, pull the upscaled colour
+        # distribution back onto the source clip (remacri-4x over-punches
+        # contrast/saturation -> "neon"; this is what made only the 4k look off).
+        self.esrgan_color_match = bool(self.raw.get("esrgan_color_match", True))
 
         self.poses = self.motion["poses"]
         self.speed_by_pose = self.motion["speed_by_pose"]

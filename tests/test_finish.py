@@ -19,28 +19,37 @@ def test_recipe_config_defaults():
     assert 1.0 <= c.saturation_boost <= 1.5
 
 
-def test_speed_match_config_loads():
+def test_speed_match_and_join_config_loads():
     c = Config()
     assert isinstance(c.continuation_speed_match, bool)
+    assert isinstance(c.esrgan_color_match, bool)
+    assert c.join_sharpen >= 0.0
 
 
-def test_join_graph_plain_when_no_retime():
-    # retime None or ~1.0 -> simple colour-correct + xfade, no split/retime nodes
+def test_join_graph_is_hard_cut_no_xfade():
+    # join is a straight concat at the true cut frame, never a cross-dissolve
     for r in (None, 1.0, 1.0005):
-        g = finish._join_graph("CORR", ov=17, n1=81, fps=16, retime=r)
-        assert "CORR" in g and "xfade=transition=fade" in g
-        assert "split" not in g and "trim=" not in g
-        assert "offset=4.0000" in g and "duration=1.0625" in g  # (81-17)/16, 17/16
+        g = finish._join_graph("CORR", cut=18, fps=16, retime=r)
+        assert "CORR" in g and "concat=n=2:v=1" in g
+        assert "xfade" not in g                       # no ghosting/jump source
+        assert "trim=start_frame=18" in g             # drop reproduced overlap
+        assert "(PTS-STARTPTS)/" not in g             # no retime when ratio ~1
 
 
-def test_join_graph_retimes_only_new_frames():
-    g = finish._join_graph("CORR", ov=17, n1=81, fps=16, retime=1.300)
-    # overlap kept at native rate; ONLY the post-overlap frames time-stretched by 1/F
-    assert "trim=end_frame=17" in g          # the overlap segment
-    assert "trim=start_frame=17" in g        # the new segment
+def test_join_graph_retimes_new_frames_when_ratio_off():
+    g = finish._join_graph("CORR", cut=18, fps=16, retime=1.300)
+    assert "trim=start_frame=18" in g
     assert "setpts=(PTS-STARTPTS)/1.300" in g
-    assert "settb=AVTB" in g and "concat=n=2:v=1" in g
-    assert "xfade=transition=fade:duration=1.0625:offset=4.0000" in g
+    assert "concat=n=2:v=1" in g and "xfade" not in g
+
+
+def test_norm_lut_pulls_toward_source():
+    # current (neon) std bigger than source -> gain < 1 (pulls contrast DOWN)
+    lut = finish._norm_lut([100, 100, 100], [40, 40, 40],
+                           [110, 110, 110], [60, 60, 60])
+    assert lut.startswith("lutrgb=") and "r=clip(" in lut
+    assert "*0.667" in lut          # 40/60
+    assert "+100.00" in lut         # mapped back onto source mean
 
 
 def test_wan_workflow_has_continuation_nodes():

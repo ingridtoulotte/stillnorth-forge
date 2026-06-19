@@ -1,16 +1,19 @@
 """Native-overlap continuation join + ESRGAN/contrast UHD finisher.
 
-This is the proven "The Still North" recipe, verified across 6 sources:
-  - GOLD JOIN: the continuation's first `overlap` frames are the SAME content as
-    clip 1's last `overlap` frames (Wan reproduced them as known context), so they
-    are an exact colour reference. Match the continuation to clip 1 (per-channel
-    RGB mean+std), light unsharp, retime the NEW frames to clip 1's motion speed
-    (Farneback optical-flow ratio), then xfade ACROSS the overlap -> invisible
-    morph (not a content fade), no colour/speed step.
+This is the proven "The Still North" recipe:
+  - GOLD JOIN: Wan re-renders the seeded frames at the head of the continuation.
+    Find which output frame reproduces clip 1's last real frame (frame match) ->
+    the next one is the first genuinely NEW frame = the true cut. Colour-match the
+    continuation to clip 1 (per-channel RGB mean+std), sharpen it to match, retime
+    the new frames to clip 1's motion speed (Farneback flow ratio), then HARD-CUT
+    concat. No xfade: cross-dissolving clip 1's tail with Wan's re-rendered copy of
+    it ghosted ~1s of motion (blur) and snapped (forward jump). The cut is
+    continuous by construction, so a straight join is seamless once colour matches.
   - FINISH: per-frame progressive contrast+saturation de-drift (Wan drifts toward
     higher contrast over a continuation -> "neon end"; corrected against the linear
-    trend, gentle early / stronger late, keeping natural variation), then
-    Real-ESRGAN (Upscayl) per-frame super-res, then UHD scale + crisp + grain.
+    trend), then Real-ESRGAN (Upscayl) per-frame super-res, then colour-match the
+    super-res back onto the source clip (remacri over-punches colour = the 4k-only
+    neon), then UHD scale + crisp + grain.
 
 numpy/cv2 are imported lazily so the package still loads on a lanczos-only box.
 """
@@ -90,47 +93,85 @@ def _flow(path, lo=0, hi=10 ** 9):
     return float(sum(mags) / len(mags)) if mags else 0.0
 
 
-def _join_graph(cor, ov, n1, fps, retime):
-    """Build the xfade filter_complex.
+def _last_frame_gray(path, n, size=(128, 72)):
+    np, cv2 = _np_cv2()
+    cap = cv2.VideoCapture(path)
+    last = None
+    while True:
+        ok, fr = cap.read()
+        if not ok:
+            break
+        last = fr
+    cap.release()
+    return cv2.cvtColor(cv2.resize(last, size), cv2.COLOR_BGR2GRAY).astype(float)
 
-    retime is None / ~1.0  -> plain: colour-correct clip2, xfade across the overlap.
-    retime is a flow ratio F -> split the corrected continuation: keep the `ov`
-    overlap frames at native rate (they ARE clip1's frames, must line up for the
-    morph) and time-stretch ONLY the new frames by 1/F so clip2's motion speed
-    matches clip1, then concat + xfade across the overlap. settb=AVTB pins a
-    common timebase so the split/retime/concat stays frame-accurate."""
-    dur = ov / fps
-    off = (n1 - ov) / fps
-    if not retime or abs(retime - 1.0) < 1e-3:
-        return (f"[1:v]{cor},setpts=PTS-STARTPTS[b];"
-                f"[0:v][b]xfade=transition=fade:"
-                f"duration={dur:.4f}:offset={off:.4f}[o]")
-    return (f"[0:v]settb=AVTB,setpts=PTS-STARTPTS[a];"
-            f"[1:v]{cor}[cc];[cc]split[s0][s1];"
-            f"[s0]trim=end_frame={ov},setpts=PTS-STARTPTS[ovl];"
-            f"[s1]trim=start_frame={ov},setpts=(PTS-STARTPTS)/{retime:.3f}[nw];"
-            f"[ovl][nw]concat=n=2:v=1,fps={fps},settb=AVTB,setpts=PTS-STARTPTS[b];"
-            f"[a][b]xfade=transition=fade:duration={dur:.4f}:offset={off:.4f}[o]")
+
+def _match_offset(clip1, raw, n1, search):
+    """Find the continuation frame that reproduces clip1's LAST real frame.
+
+    WanCameraImageToVideo masks the seeded frames as KNOWN and re-renders them at
+    the head of the output; how many it reproduces (N vs N+3) is opaque, so we
+    don't trust a fixed overlap count. Match clip1's final frame against the first
+    `search` continuation frames; the frame AFTER the best match is the first
+    genuinely NEW frame, i.e. the true cut point. A wrong fixed offset is exactly
+    what shows as a forward jump at the seam."""
+    np, cv2 = _np_cv2()
+    last = _last_frame_gray(clip1, n1)
+    cap = cv2.VideoCapture(raw)
+    i = 0
+    best, bestd = 0, 1e18
+    while i <= search:
+        ok, fr = cap.read()
+        if not ok:
+            break
+        g = cv2.cvtColor(cv2.resize(fr, (128, 72)), cv2.COLOR_BGR2GRAY).astype(float)
+        d = float(((g - last) ** 2).mean())
+        if d < bestd:
+            bestd, best = d, i
+        i += 1
+    cap.release()
+    return best
+
+
+def _join_graph(cor, cut, fps, retime):
+    """Hard-cut concat: clip1 in full, then the continuation from frame `cut`
+    (its first genuinely new frame) colour-matched + optionally retimed to clip1's
+    motion speed. NO xfade -- cross-dissolving clip1's tail with Wan's re-rendered
+    copy of the same frames ghosted ~1s of motion (read as blur) and snapped at the
+    end (forward jump). The cut is continuous by construction (cut == the frame
+    after clip1's last), so a straight join is seamless once colour is matched."""
+    a = "[0:v]settb=AVTB,setpts=PTS-STARTPTS[a];"
+    if retime and abs(retime - 1.0) >= 1e-3:
+        b = (f"[1:v]{cor},trim=start_frame={cut},"
+             f"setpts=(PTS-STARTPTS)/{retime:.3f},fps={fps},"
+             f"settb=AVTB,setpts=PTS-STARTPTS[b];")
+    else:
+        b = (f"[1:v]{cor},trim=start_frame={cut},"
+             f"setpts=PTS-STARTPTS,settb=AVTB[b];")
+    return a + b + "[a][b]concat=n=2:v=1[o]"
 
 
 def gold_join(cfg, clip1, raw, dst):
-    """clip1 + overlap-matched/(retimed)/xfaded continuation -> seamless ~10s clip."""
+    """clip1 + colour-matched/(retimed) continuation, hard-cut -> seamless ~10s."""
     np, _ = _np_cv2()
     ov = cfg.overlap_frames
     n1 = _frame_count(clip1)
-    cm, cs = _rgb_stats(clip1, n1 - ov, n1 - 1)      # clip1 tail (the overlap)
-    om, osd = _rgb_stats(raw, 0, ov - 1)             # continuation head (same content)
+    m = _match_offset(clip1, raw, n1, 2 * ov + 6)    # cont frame == clip1's last
+    cut = m + 1                                       # first genuinely new frame
+    mlen = m + 1                                      # frames in the matched overlap
+    cm, cs = _rgb_stats(clip1, n1 - mlen, n1 - 1)     # clip1 tail (matched window)
+    om, osd = _rgb_stats(raw, 0, m)                   # continuation's copy of it
     g = np.clip(cs / np.maximum(osd, 1e-3), 0.6, 1.7)
     lut = (f"r=clip((val-{om[0]:.2f})*{g[0]:.3f}+{cm[0]:.2f}\\,0\\,255):"
            f"g=clip((val-{om[1]:.2f})*{g[1]:.3f}+{cm[1]:.2f}\\,0\\,255):"
            f"b=clip((val-{om[2]:.2f})*{g[2]:.3f}+{cm[2]:.2f}\\,0\\,255)")
-    cor = f"lutrgb={lut},unsharp=5:5:0.5:5:5:0.0"
+    cor = f"lutrgb={lut},unsharp=5:5:{cfg.join_sharpen:.2f}:5:5:0.0"
     F = None
     if getattr(cfg, "continuation_speed_match", False):
         f1 = _flow(clip1)              # clip1 = established motion speed
-        f2 = _flow(raw, ov)           # continuation AFTER the overlap = new frames
+        f2 = _flow(raw, cut)          # the NEW continuation frames
         F = float(np.clip(f1 / max(f2, 1e-3), 0.7, 1.7))
-    fc = _join_graph(cor, ov, n1, cfg.fps, F)
+    fc = _join_graph(cor, cut, cfg.fps, F)
     return _run([cfg.ffmpeg, "-y", "-loglevel", "error", "-i", clip1, "-i", raw,
                  "-filter_complex", fc, "-map", "[o]", "-r", str(cfg.fps),
                  "-c:v", "libx264", "-crf", "14", "-pix_fmt", "yuv420p", dst]) \
@@ -179,8 +220,51 @@ def esrgan_available(cfg):
         and os.path.isdir(cfg.esrgan_models_dir)
 
 
+def _global_stats_video(path, sample=16):
+    """Per-channel RGB mean+std over `sample` frames spread across the clip."""
+    np, cv2 = _np_cv2()
+    n = _frame_count(path) or 1
+    idx = set(int(round(x)) for x in np.linspace(0, max(0, n - 1), sample))
+    cap = cv2.VideoCapture(path)
+    i = 0
+    frames = []
+    while True:
+        ok, fr = cap.read()
+        if not ok:
+            break
+        if i in idx:
+            frames.append(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB).astype(float))
+        i += 1
+    cap.release()
+    a = np.stack(frames)
+    return a.mean(axis=(0, 1, 2)), a.std(axis=(0, 1, 2))
+
+
+def _global_stats_pngs(files, sample=16):
+    np, cv2 = _np_cv2()
+    step = max(1, len(files) // sample)
+    frames = [cv2.cvtColor(cv2.imread(p), cv2.COLOR_BGR2RGB).astype(float)
+              for p in files[::step]]
+    a = np.stack(frames)
+    return a.mean(axis=(0, 1, 2)), a.std(axis=(0, 1, 2))
+
+
+def _norm_lut(src_m, src_sd, cur_m, cur_sd):
+    """lutrgb that maps the CURRENT colour distribution back onto the SOURCE's
+    per-channel mean+std (val' = (val-cur)*src_sd/cur_sd + src). remacri-4x punches
+    contrast/saturation ('neon'); this undoes it against the real source clip."""
+    np, _ = _np_cv2()
+    g = np.clip(src_sd / np.maximum(cur_sd, 1e-3), 0.5, 1.5)
+    ch = "rgb"
+    parts = [f"{ch[c]}=clip((val-{cur_m[c]:.2f})*{g[c]:.3f}+{src_m[c]:.2f}\\,0\\,255)"
+             for c in range(3)]
+    return "lutrgb=" + ":".join(parts)
+
+
 def esrgan_finish(cfg, src, dst):
-    """Per-frame de-drift -> Real-ESRGAN super-res -> UHD scale + crisp + grain."""
+    """Per-frame de-drift -> Real-ESRGAN super-res -> colour-match back to source
+    (kills remacri 'neon') -> UHD scale + crisp + grain."""
+    np, _ = _np_cv2()
     tmp = tempfile.mkdtemp(prefix="snf_finish_")
     inF = os.path.join(tmp, "in")
     outF = os.path.join(tmp, "out")
@@ -193,6 +277,9 @@ def esrgan_finish(cfg, src, dst):
         files = sorted(glob.glob(os.path.join(inF, "*.png")))
         if not files:
             return False
+        # source colour BEFORE the de-drift edits the input frames in place
+        src_m, src_sd = (_global_stats_video(src)
+                         if cfg.esrgan_color_match else (None, None))
         if cfg.contrast_flatten:
             _progressive_contrast(files, cfg)
         if subprocess.run([cfg.esrgan_bin, "-i", inF, "-o", outF, "-n",
@@ -202,6 +289,10 @@ def esrgan_finish(cfg, src, dst):
                           stderr=subprocess.DEVNULL).returncode != 0:
             return False
         chain = []
+        if cfg.esrgan_color_match:
+            sr_files = sorted(glob.glob(os.path.join(outF, "*.png")))
+            cur_m, cur_sd = _global_stats_pngs(sr_files)
+            chain.append(_norm_lut(src_m, src_sd, cur_m, cur_sd))
         if cfg.final_tdenoise:
             chain.append(f"hqdn3d={cfg.final_tdenoise}")
         chain.append(f"scale=-2:{cfg.final_height}:flags=lanczos")

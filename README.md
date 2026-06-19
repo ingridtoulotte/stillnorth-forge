@@ -5,8 +5,8 @@
 ```
 HTML prompts ─▶ FLUX.2 images ─▶ upscale ×2 ─▶ CLIP classify (A/B/C/D)
    ─▶ Wan 2.2 clip 1 ─▶ native-overlap continuation (clip 1's last 17 frames, camera dropped)
-   ─▶ gold overlap join (RGB colour-match + xfade over the overlap) ─▶ one seamless ~10 s loop
-   ─▶ ESRGAN finish (per-frame contrast de-drift ─▶ Real-ESRGAN super-res ─▶ UHD 2160p + crisp)
+   ─▶ gold join (RGB colour-match + speed-retime + hard cut at the matched frame) ─▶ one seamless ~10 s loop
+   ─▶ ESRGAN finish (contrast de-drift ─▶ Real-ESRGAN super-res ─▶ colour-match back to source ─▶ UHD 2160p + crisp)
    ─▶ 🎞 Long-video assembler ─▶ randomised, faded 15 min … 12 h ambient compilations
 ```
 
@@ -42,8 +42,10 @@ All four are broad, realistic and loopable so a single prompt fits every image i
 **Native-overlap continuation (default `continuation_mode: native_overlap`).** The proven recipe — verified seamless across forest, snow, autumn-lake, green-coast, golden-mountain and marsh sources. Instead of seeding clip 2 from a single still (which gives Wan no motion context → surge, colour pop, speed jump, soft edges), the pipeline feeds **clip 1's last `overlap_frames` (17) real frames** into `WanCameraImageToVideo.start_image`. Wan masks those as *known* and generates the rest as a true continuation of their actual motion — **no surge / colour / speed / sharpness seam by construction**, in one generation.
 
 - `continuation_drop_camera` (default on) — drop the camera embedding on the continuation so it pans at the *inherited* rate from the 17 known frames, not camera-on-top. Stops the over-pan that revealed soft, hallucinated edges (progressive edge-blur). This was the single fix that flattened revealed-edge sharpness over time.
-- **Gold overlap join** (`finish.gold_join`) — the continuation's first 17 frames *are* clip 1's last 17 (the known context), so they are an exact colour reference. Match the continuation to clip 1 per-channel (RGB **mean + std**), light unsharp, then `xfade` **across the overlap** → an invisible texture morph (the same content on both sides), not a stylistic crossfade.
-- `overlap_frames: 17` — `N + 3` divisible by 4 keeps clean latent groups.
+- **Gold join** (`finish.gold_join`) — Wan re-renders the seeded frames at the head of the continuation, so the join frame-matches clip 1's last real frame against the continuation head to find the **true cut** (the first genuinely new frame). It colour-matches the continuation to clip 1 per-channel (RGB **mean + std**), sharpens it to match (`join_sharpen`), retimes the new frames to clip 1's motion speed (`continuation_speed_match`, Farneback flow ratio), then **hard-cuts**. An `xfade` across the overlap was the old approach — it cross-dissolved clip 1's tail with Wan's *re-rendered* copy of it, which sits ~1 frame ahead, ghosting motion (blur) and snapping (forward jump). The matched hard cut is continuous by construction.
+- `continuation_speed_match` (default on) — the continuation runs ~0.7–0.95× clip 1's speed; only the new frames are time-stretched so motion speed matches across the cut.
+- `esrgan_color_match` (default on) — remacri-4x over-punches contrast/saturation (the *4k-only* "neon"); after super-res the colour distribution is pulled back onto the source clip.
+- `overlap_frames: 17` — seed size; `N + 3` divisible by 4 keeps clean latent groups (the cut frame itself is found by matching, not assumed).
 - **Do not chain** more than one continuation: a second continuation built on a continuation compounds Wan's drift → end-of-clip hallucination. One continuation = ~10 s; go longer via the assembler, not by chaining.
 
 **ESRGAN finish (default `final_upscaler: esrgan`, `finish.esrgan_finish`).** Real detail, not the soft lanczos chain:
