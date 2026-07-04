@@ -124,6 +124,20 @@ class Config:
         self.body_sharpen = bool(self.raw.get("body_sharpen", True))
         # speed_clamp_hi: upper clamp for the seam speed resample factor.
         self.speed_clamp_hi = float(self.raw.get("speed_clamp_hi", 1.8))
+        # speed_retime_mc: motion-compensated retime (setpts + minterpolate)
+        # instead of nearest-frame picking, which stuttered (periodic double
+        # steps read as objects jumping every few frames).
+        self.speed_retime_mc = bool(self.raw.get("speed_retime_mc", True))
+        # band_dedrift: per-band (sky/mid/ground) colour drift removal after
+        # the global affine -- bands drift in OPPOSITE directions on some
+        # scenes, which a global correction cannot hold.
+        self.band_dedrift = bool(self.raw.get("band_dedrift", True))
+        # seam_sharp_alpha_up: sharpness target position when the continuation
+        # is SHARPER than clip1's diffused tail (equalise up, not to the blur).
+        self.seam_sharp_alpha_up = float(self.raw.get("seam_sharp_alpha_up", 1.0))
+        # tail_ramp_pow: ramp exponent for the tail sharpen-up (<1 = correction
+        # reaches most of the tail, not just the last frames).
+        self.tail_ramp_pow = float(self.raw.get("tail_ramp_pow", 0.5))
         # Wan render resolution, injected into the camera-embedding node at
         # submit time (overrides whatever the workflow export carries).
         # 1104x624 = 1.72x the pixels of 832x480; measured ~1.8x render time,
