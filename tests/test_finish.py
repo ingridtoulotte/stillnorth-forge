@@ -157,3 +157,45 @@ def test_esrgan_available_false_when_missing(tmp_path):
     assert finish.esrgan_available(c) is False
     assert finish.esrgan_available(
         SimpleNamespace(esrgan_bin="", esrgan_models_dir="")) is False
+
+
+def test_new_seam_config_keys():
+    c = Config()
+    assert c.seam_sharp_window >= 0
+    assert isinstance(c.body_sharpen, bool)
+    assert c.speed_clamp_hi >= 1.0
+    assert c.continuation_drop_camera is False    # camera-kept is the default
+
+
+def test_affine_match_hits_target_without_double_desat():
+    import numpy as np
+    rng = np.random.default_rng(7)
+    # punchy clip2 head: higher mean and higher spread than the target
+    frames = [rng.normal(140, 40, (48, 64, 3)).clip(0, 255) for _ in range(6)]
+    box = (0, 0, 64, 48)
+    cur_m, cur_sd = finish._box_stats(frames, box)
+    T_m, T_sd = np.array([120.0] * 3), np.array([25.0] * 3)
+    out = finish._affine_match(frames, cur_m, cur_sd, T_m, T_sd)
+    out_m, out_sd = finish._box_stats(out, box)
+    assert np.allclose(out_m, T_m, atol=1.5)      # one pass lands ON target
+    assert np.allclose(out_sd, T_sd, atol=1.5)    # std matched, not overshot
+
+
+def test_windowed_sharp_leaves_body_untouched():
+    import numpy as np
+    rng = np.random.default_rng(3)
+    frames = [rng.normal(128, 30, (48, 64, 3)).clip(0, 255) for _ in range(40)]
+    body_before = [f.copy() for f in frames[16:]]
+    out = finish._windowed_sharp(frames, T_sharp=1.0, box=(0, 0, 64, 48), W=16)
+    assert len(out) == 40
+    for a, b in zip(out[16:], body_before):       # frames past W: bit-identical
+        assert np.array_equal(a, b)
+
+
+def test_body_sharpen_noop_when_already_sharp():
+    import numpy as np
+    rng = np.random.default_rng(5)
+    sharp = [rng.normal(128, 50, (48, 64, 3)).clip(0, 255) for _ in range(40)]
+    out = finish._body_sharpen([f.copy() for f in sharp], sharp, (0, 0, 64, 48))
+    for a, b in zip(out, sharp):                  # same texture level -> no-op
+        assert np.array_equal(a, b)

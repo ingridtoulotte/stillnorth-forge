@@ -285,6 +285,71 @@ def _ramp_toward(orig, corrected):
     return [np.clip((1 - wi) * o + wi * c, 0, 255) for o, c, wi in zip(orig, corrected, w)]
 
 
+def _box_stats(frames, box):
+    """Per-channel BGR mean+std over the visible box across `frames`."""
+    np, _ = _np_cv2()
+    x, y, w, h = box
+    a = np.stack([f[y:y + h, x:x + w] for f in frames])
+    return a.mean(axis=(0, 1, 2)), a.std(axis=(0, 1, 2))
+
+
+def _affine_match(frames, cur_m, cur_sd, T_m, T_sd):
+    """ONE per-channel affine map onto the target mean+std.
+
+    Replaces the old luma-contrast scale + HSV-saturation scale pair: scaling
+    around the luma mean already reduces chroma by ~k_con, then k_sat cut it
+    AGAIN -- clip2 landed 20-25% undersaturated (the visible colour step at
+    the seam). A single affine per channel matches brightness, contrast AND
+    colour axes coherently, nothing is double-counted."""
+    np, _ = _np_cv2()
+    g = np.clip(T_sd / np.maximum(cur_sd, 1e-3), 0.6, 1.6)
+    return [np.clip((f - cur_m) * g + T_m, 0, 255) for f in frames]
+
+
+def _windowed_sharp(new, T_sharp, box, W):
+    """Match texture only across the first W frames, correction ramped 1->0.
+
+    The old full-clip match Gaussian-blurred ALL of clip2 down to clip1's
+    motion-diffused TAIL level (the softest frames of clip1) -- the entire
+    second half turned to mush. Seam-local matching keeps the body's native
+    detail."""
+    np, _ = _np_cv2()
+    if len(new) <= 2 or W <= 0:
+        return new
+    W = min(W, len(new))
+    head = [f.copy() for f in new[:W]]
+    corr = _match_seam_sharpness(head, T_sharp, box)
+    ramp = np.linspace(1.0, 0.0, W)
+    out = [np.clip(wi * c + (1 - wi) * o, 0, 255)
+           for o, c, wi in zip(new[:W], corr, ramp)]
+    return out + new[W:]
+
+
+def _body_sharpen(new, c1, box):
+    """Bring clip2's BODY texture up to clip1's BODY level with one
+    binary-searched unsharp. The camera-kept continuation renders slightly
+    softer overall; this recovers it without touching the seam logic."""
+    np, cv2 = _np_cv2()
+    body1 = c1[10:max(11, len(c1) - 10):5]
+    body2 = new[8::5]
+    ref = _sharp_metric(body1, box)
+    cur = _sharp_metric(body2, box)
+    if cur >= ref * 0.9 or cur <= 1e-3 or not body2:
+        return new
+    sample = body2[:10]
+    lo, hi = 0.0, 3.0
+    for _ in range(10):
+        mid = (lo + hi) / 2
+        test = [np.clip(f + (f - cv2.GaussianBlur(f, (0, 0), 3)) * mid, 0, 255)
+                for f in sample]
+        (lo, hi) = (mid, hi) if _sharp_metric(test, box) < ref else (lo, mid)
+    amt = hi
+    if amt <= 0.02:
+        return new
+    return [np.clip(f + (f - cv2.GaussianBlur(f, (0, 0), 3)) * amt, 0, 255)
+            for f in new]
+
+
 def _even(x):
     x = int(round(x))
     return x - (x % 2)
@@ -350,32 +415,39 @@ def gold_join(cfg, clip1, raw, dst):
     new = c2[cut:]
     if not new:
         return False
-    alpha = float(getattr(cfg, "seam_blend_alpha", 1.0))  # 1.0 = old full-match behaviour
+    alpha = float(getattr(cfg, "seam_blend_alpha", 0.35))
     c1_tail = [f.copy() for f in c1[-TAIL:]]
     if getattr(cfg, "clip2_dedrift", True):
         new = _dedrift_clip2(new, ref_bgr, box)
-        ref_con, ref_sat = _contrast_sat(c1[-K:], box)
-        cur_con, cur_sat = _contrast_sat(new[:K], box)
-        T_con = ref_con + alpha * (cur_con - ref_con)
-        T_sat = ref_sat + alpha * (cur_sat - ref_sat)
-        new = _match_seam_contrast(new, T_con, T_sat, box)
-        if alpha < 0.999:
-            tail_corr = _match_seam_contrast([f.copy() for f in c1_tail],
-                                              T_con, T_sat, box, K=TAIL)
+        ref_m, ref_sd = _box_stats(c1[-K:], box)
+        cur_m, cur_sd = _box_stats(new[:K], box)
+        T_m = ref_m + alpha * (cur_m - ref_m)
+        T_sd = ref_sd + alpha * (cur_sd - ref_sd)
+        new = _affine_match(new, cur_m, cur_sd, T_m, T_sd)
+        if alpha > 0.001:
+            t_m, t_sd = _box_stats(c1_tail, box)
+            tail_corr = _affine_match([f.copy() for f in c1_tail],
+                                      t_m, t_sd, T_m, T_sd)
             c1_tail = _ramp_toward(c1_tail, tail_corr)
     # speed: match clip1's BODY speed to clip2's BODY speed (both excluding the
-    # seam transient). Gentle, tightly clamped, applied by in-memory resample.
+    # seam transient). Applied by in-memory resample. The camera-kept
+    # continuation runs ~0.85-0.9x; the wide clamp also covers the occasional
+    # slow render without letting a bad flow reading halve the clip.
     if getattr(cfg, "continuation_speed_match", False):
         f1 = _flow(clip1, 4, n1 - 4)
         f2 = _flow(raw, cut + 3, 10 ** 9)
-        F = float(np.clip(f1 / max(f2, 1e-3), 0.8, 1.25))
+        F = float(np.clip(f1 / max(f2, 1e-3), 0.8,
+                          float(getattr(cfg, "speed_clamp_hi", 1.8))))
         new = _resample_speed(new, F)
+    if getattr(cfg, "body_sharpen", True):
+        new = _body_sharpen(new, c1, box)
     if getattr(cfg, "clip2_dedrift", True):
         ref_sharp = _sharp_metric(c1_tail[-K:], box)
         cur_sharp = _sharp_metric(new[:K], box)
         T_sharp = ref_sharp + alpha * (cur_sharp - ref_sharp)
-        new = _match_seam_sharpness(new, T_sharp, box)
-        if alpha < 0.999:
+        new = _windowed_sharp(new, T_sharp, box,
+                              int(getattr(cfg, "seam_sharp_window", 16)))
+        if alpha > 0.001:
             tail_corr = _match_seam_sharpness([f.copy() for f in c1_tail],
                                                T_sharp, box, K=TAIL)
             c1_tail = _ramp_toward(c1_tail, tail_corr)
@@ -518,6 +590,22 @@ def esrgan_finish(cfg, src, dst):
     os.makedirs(inF)
     os.makedirs(outF)
     try:
+        out_fps = cfg.fps
+        final_fps = int(getattr(cfg, "final_fps", 0))
+        if final_fps and final_fps != cfg.fps:
+            # motion-compensated interpolation BEFORE super-res: Wan's native
+            # 16fps judders on a big screen; mci doubles it cleanly on slow
+            # pans (checked for warp artifacts on real footage).
+            interp = os.path.join(tmp, "interp.mp4")
+            if not _run([cfg.ffmpeg, "-y", "-loglevel", "error", "-i", src,
+                         "-vf",
+                         f"minterpolate=fps={final_fps}:mi_mode=mci:"
+                         "mc_mode=aobmc:me_mode=bidir:vsbmc=1",
+                         "-c:v", "libx264", "-crf", "14", "-pix_fmt",
+                         "yuv420p", interp]):
+                return False
+            src = interp
+            out_fps = final_fps
         if not _run([cfg.ffmpeg, "-y", "-loglevel", "error", "-i", src,
                      os.path.join(inF, "f%05d.png")]):
             return False
@@ -557,7 +645,7 @@ def esrgan_finish(cfg, src, dst):
             chain.append(f"noise={cfg.final_grain}")
         vf = ",".join(chain)
         return _run([cfg.ffmpeg, "-y", "-loglevel", "error", "-framerate",
-                     str(cfg.fps), "-i", os.path.join(outF, "f%05d.png"),
+                     str(out_fps), "-i", os.path.join(outF, "f%05d.png"),
                      "-vf", vf] + _codec(cfg, cfg.final_cq) + [dst]) \
             and os.path.exists(dst)
     finally:
