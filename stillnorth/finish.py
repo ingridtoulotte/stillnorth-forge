@@ -234,6 +234,37 @@ def _match_seam_sharpness(new, ref_sharp, box, K=8):
     return [np.clip(f + (f - cv2.GaussianBlur(f, (0, 0), 3)) * amt, 0, 255) for f in new]
 
 
+def _struct_metric(frames, box):
+    """Structure sharpness, grain-blind: varLap after a sigma-1.5 Gaussian.
+    Plain varLap counts grain as sharpness -- a noisy-but-smeared clip1 tail
+    measured SHARPER than a clean continuation, inverting the equalize
+    decision. Blurring first suppresses grain; real edges survive."""
+    _, cv2 = _np_cv2()
+    return _sharp_metric([cv2.GaussianBlur(f, (0, 0), 1.5) for f in frames],
+                         box)
+
+
+def _sharpen_to_struct(frames, target, box, K=10):
+    """Binary-search ONE unsharp amount lifting `frames` structure to
+    `target` (sharpen only -- never blurs)."""
+    np, cv2 = _np_cv2()
+    cur = _struct_metric(frames[:K], box)
+    if cur >= target or cur <= 1e-3:
+        return frames
+    sample = frames[:K]
+    lo, hi = 0.0, 3.0
+    for _ in range(10):
+        mid = (lo + hi) / 2
+        test = [np.clip(f + (f - cv2.GaussianBlur(f, (0, 0), 3)) * mid, 0, 255)
+                for f in sample]
+        (lo, hi) = (mid, hi) if _struct_metric(test, box) < target else (lo, mid)
+    amt = hi
+    if amt <= 0.02:
+        return frames
+    return [np.clip(f + (f - cv2.GaussianBlur(f, (0, 0), 3)) * amt, 0, 255)
+            for f in frames]
+
+
 def _contrast_sat(frames, box):
     """Mean (luma std, HSV saturation mean) over the visible region -- the
     same two numbers Wan's continuation pass consistently overshoots on."""
@@ -273,15 +304,17 @@ def _match_seam_contrast(new, ref_con, ref_sat, box, K=8):
     return out
 
 
-def _ramp_toward(orig, corrected):
+def _ramp_toward(orig, corrected, p=1.0):
     """Cross-fade `orig` into `corrected` along a 0->1 ramp across the list --
     a smooth ease, not a cut, so retouching clip1's own tail doesn't introduce
-    a second internal seam. Weight 1.0 only lands on the very last frame."""
+    a second internal seam. Weight 1.0 only lands on the very last frame.
+    `p` < 1 rises faster early (sqrt ramp) so a correction covers more of the
+    tail instead of only kicking in on the final frames."""
     np, _ = _np_cv2()
     n = len(orig)
     if n == 0:
         return orig
-    w = np.linspace(0.0, 1.0, n)
+    w = np.linspace(0.0, 1.0, n) ** p
     return [np.clip((1 - wi) * o + wi * c, 0, 255) for o, c, wi in zip(orig, corrected, w)]
 
 
@@ -516,12 +549,33 @@ def gold_join(cfg, clip1, raw, dst):
     if getattr(cfg, "body_sharpen", True):
         new = _body_sharpen(new, c1, box)
     if getattr(cfg, "clip2_dedrift", True):
+        # STRUCTURE equalize-up: when the continuation's grain-blind structure
+        # is cleaner than clip1's motion-diffused tail, sharpen the tail UP to
+        # meet it (never blur the clean side down) -- a midpoint at the blur
+        # reads as "end of clip1 goes soft, clip2 snaps clean". Plain varLap
+        # cannot make this call (grain counts as sharpness), hence the
+        # dedicated grain-blind metric.
+        # grain targets measured BEFORE any tail edit -- the struct sharpen
+        # below raises the tail's grain reading, and chaining the window
+        # matcher off that pumped clip2's head into a sharpness bump.
         ref_sharp = _sharp_metric(c1_tail[-K:], box)
         cur_sharp = _sharp_metric(new[:K], box)
         T_sharp = ref_sharp + alpha * (cur_sharp - ref_sharp)
+        ref_st = _struct_metric(c1_tail[-K:], box)
+        cur_st = _struct_metric(new[:K], box)
+        struct_fired = cur_st > ref_st * 1.05
+        if struct_fired:
+            a_up = float(getattr(cfg, "seam_sharp_alpha_up", 0.85))
+            T_st = ref_st + a_up * (cur_st - ref_st)
+            tail_corr = _sharpen_to_struct([f.copy() for f in c1_tail],
+                                           T_st, box)
+            c1_tail = _ramp_toward(c1_tail, tail_corr,
+                                   float(getattr(cfg, "tail_ramp_pow", 0.5)))
         new = _windowed_sharp(new, T_sharp, box,
                               int(getattr(cfg, "seam_sharp_window", 16)))
-        if alpha > 0.001:
+        if alpha > 0.001 and not struct_fired:
+            # tail grain-pull would Gaussian the freshly sharpened tail back
+            # down -- only run it when the struct equalize did not.
             tail_corr = _match_seam_sharpness([f.copy() for f in c1_tail],
                                                T_sharp, box, K=TAIL)
             c1_tail = _ramp_toward(c1_tail, tail_corr)

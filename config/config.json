@@ -39,6 +39,8 @@
   "speed_clamp_hi": 1.8,
   "speed_retime_mc": true,
   "band_dedrift": true,
+  "seam_sharp_alpha_up": 1.0,
+  "tail_ramp_pow": 0.5,
   "wan_width": 1104,
   "wan_height": 624,
 
