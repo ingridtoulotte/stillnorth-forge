@@ -199,3 +199,29 @@ def test_body_sharpen_noop_when_already_sharp():
     out = finish._body_sharpen([f.copy() for f in sharp], sharp, (0, 0, 64, 48))
     for a, b in zip(out, sharp):                  # same texture level -> no-op
         assert np.array_equal(a, b)
+
+
+def test_retime_mc_config_keys():
+    c = Config()
+    assert isinstance(c.speed_retime_mc, bool)
+    assert isinstance(c.band_dedrift, bool)
+
+
+def test_dedrift_bands_fixes_divergent_drift():
+    import numpy as np
+    rng = np.random.default_rng(11)
+    H, W = 48, 64
+    ref = [rng.normal(120, 20, (H, W, 3)).clip(0, 255) for _ in range(10)]
+    new = []
+    for i in range(24):
+        f = rng.normal(120, 20, (H, W, 3)).clip(0, 255)
+        f[:H // 3] += i * 0.5          # sky drifts lighter
+        f[2 * H // 3:] -= i * 0.6      # ground drifts darker
+        new.append(f.clip(0, 255))
+    out = finish._dedrift_bands([f.copy() for f in new], ref, (0, 0, W, H))
+    sky_end = out[-1][:H // 3].mean()
+    gnd_end = out[-1][2 * H // 3:].mean()
+    sky_ref = np.mean([f[:H // 3].mean() for f in ref[-8:]])
+    gnd_ref = np.mean([f[2 * H // 3:].mean() for f in ref[-8:]])
+    assert abs(sky_end - sky_ref) < 3.0    # divergent drifts both pinned
+    assert abs(gnd_end - gnd_ref) < 3.0

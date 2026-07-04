@@ -367,6 +367,75 @@ def _resample_speed(frames, F):
     return [frames[min(n - 1, int(round(i * F)))] for i in range(tgt)]
 
 
+def _resample_blend(frames, F):
+    """Retime by factor F with FRACTIONAL frame blending.
+
+    Nearest-frame picking creates a skip CADENCE (every ~1/(F-1) frames the
+    motion double-steps -- measured as a periodic flow spike, reads as
+    objects/shadows jumping). Sampling at fractional positions and linearly
+    blending the two neighbours keeps motion even; static texture is
+    untouched (identical neighbours blend to themselves) and slow drone pans
+    only pick up sub-pixel motion blur. Full minterpolate re-synthesis was
+    tried and rejected: it softened the whole clip."""
+    np, _ = _np_cv2()
+    n = len(frames)
+    if n < 2 or abs(F - 1.0) < 0.03:
+        return frames
+    tgt = max(2, int(round(n / F)))
+    out = []
+    for i in range(tgt):
+        pos = min(n - 1.0001, i * F)
+        k = int(pos)
+        a = pos - k
+        if a < 0.02 or k + 1 >= n:
+            out.append(frames[k])
+        else:
+            out.append(np.clip((1 - a) * frames[k] + a * frames[k + 1], 0, 255))
+    return out
+
+
+def _dedrift_bands(new, c1_tail, box, n_bands=3, alpha=0.0):
+    """Kill DIVERGENT per-band colour drift after the global match.
+
+    Measured on real clips: after the cut the sky band drifts lighter while
+    the foreground drifts darker -- opposite directions, so no global affine
+    can hold both. Fit each horizontal band's per-channel mean trend over
+    clip2, pin it to clip1's tail band means, and apply the per-band offsets
+    blended smoothly across the frame height (no visible band edges)."""
+    np, _ = _np_cv2()
+    if len(new) < 5 or not c1_tail:
+        return new
+    x, y, w, h = box
+    H = new[0].shape[0]
+    edges = [int(round(H * k / n_bands)) for k in range(n_bands + 1)]
+
+    def band_means(frame):
+        return np.array([[frame[edges[b]:edges[b + 1], x:x + w, c].mean()
+                          for c in range(3)] for b in range(n_bands)])
+
+    ref = np.mean([band_means(f) for f in c1_tail[-8:]], axis=0)
+    per_frame = np.array([band_means(f) for f in new])       # (n, bands, 3)
+    n = len(new)
+    # target = the same alpha-blended midpoint the affine match used -- pinning
+    # to clip1's raw tail here would overshoot past the affine target and
+    # reintroduce a step at the cut (measured -2L when this used raw ref).
+    head = per_frame[:min(8, n)].mean(axis=0)
+    T = ref + alpha * (head - ref)
+    idx = np.arange(n)
+    centers = np.array([(edges[b] + edges[b + 1]) / 2 for b in range(n_bands)])
+    rows = np.arange(H)
+    deg = 2 if n >= 8 else 1
+    for b in range(n_bands):
+        for c in range(3):
+            trend = np.polyval(np.polyfit(idx, per_frame[:, b, c], deg), idx)
+            per_frame[:, b, c] = T[b, c] - trend             # offset to apply
+    for i, f in enumerate(new):
+        for c in range(3):
+            off_rows = np.interp(rows, centers, per_frame[i, :, c])
+            f[..., c] = np.clip(f[..., c] + off_rows[:, None], 0, 255)
+    return new
+
+
 def _join_graph(fps, js, cw, ch, cx, cy, w, h):
     """Filter graph: clip1 (input 0) hard-cut to the de-drifted/resampled
     continuation png sequence (input 1, already the right frames at the right
@@ -424,6 +493,8 @@ def gold_join(cfg, clip1, raw, dst):
         T_m = ref_m + alpha * (cur_m - ref_m)
         T_sd = ref_sd + alpha * (cur_sd - ref_sd)
         new = _affine_match(new, cur_m, cur_sd, T_m, T_sd)
+        if getattr(cfg, "band_dedrift", True):
+            new = _dedrift_bands(new, c1, box, alpha=alpha)
         if alpha > 0.001:
             t_m, t_sd = _box_stats(c1_tail, box)
             tail_corr = _affine_match([f.copy() for f in c1_tail],
@@ -438,7 +509,10 @@ def gold_join(cfg, clip1, raw, dst):
         f2 = _flow(raw, cut + 3, 10 ** 9)
         F = float(np.clip(f1 / max(f2, 1e-3), 0.8,
                           float(getattr(cfg, "speed_clamp_hi", 1.8))))
-        new = _resample_speed(new, F)
+        if getattr(cfg, "speed_retime_mc", True):
+            new = _resample_blend(new, F)
+        else:
+            new = _resample_speed(new, F)
     if getattr(cfg, "body_sharpen", True):
         new = _body_sharpen(new, c1, box)
     if getattr(cfg, "clip2_dedrift", True):
