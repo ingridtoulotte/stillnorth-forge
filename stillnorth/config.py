@@ -115,6 +115,22 @@ class Config:
         # not). <1.0 meets in the middle: clip2 gets a smaller correction and
         # clip1's own last frames ease toward the same shared target.
         self.seam_blend_alpha = float(self.raw.get("seam_blend_alpha", 0.35))
+        # seam_sharp_window: frames of clip2 whose texture is eased toward the
+        # seam target (ramped). 0 = off. Full-clip matching is gone -- it was
+        # blurring the entire continuation down to clip1's softest frames.
+        self.seam_sharp_window = int(self.raw.get("seam_sharp_window", 16))
+        # body_sharpen: one binary-searched unsharp bringing clip2's body
+        # texture up to clip1's body level (camera-kept renders slightly soft).
+        self.body_sharpen = bool(self.raw.get("body_sharpen", True))
+        # speed_clamp_hi: upper clamp for the seam speed resample factor.
+        self.speed_clamp_hi = float(self.raw.get("speed_clamp_hi", 1.8))
+        # Wan render resolution, injected into the camera-embedding node at
+        # submit time (overrides whatever the workflow export carries).
+        # 1104x624 = 1.72x the pixels of 832x480; measured ~1.8x render time,
+        # visibly more real detail after the x4 super-res -- the blur ceiling
+        # was the 480p base, not the upscaler. 0 = leave workflow untouched.
+        self.wan_width = int(self.raw.get("wan_width", 0))
+        self.wan_height = int(self.raw.get("wan_height", 0))
         self.fps = int(self.raw["fps"])
         self.cq = int(self.raw["video_cq"])
         self.nvenc = bool(self.raw["nvenc"])
@@ -134,6 +150,9 @@ class Config:
         self.final_grain = self.raw.get("final_grain", "alls=4:allf=t+u")
         self.final_tdenoise = self.raw.get("final_temporal_denoise", "0:0:6:6")
         self.final_cq = int(self.raw.get("final_cq", 17))
+        # final_fps: motion-interpolate masters to this rate before super-res
+        # (0 = keep the native Wan rate). 32 kills the 16fps judder on TVs.
+        self.final_fps = int(self.raw.get("final_fps", 0))
         self.contrast_flatten = bool(self.raw.get("contrast_flatten", True))
         self.contrast_boost = float(self.raw.get("contrast_target_boost", 1.0))
         self.saturation_boost = float(self.raw.get("saturation_target_boost", 1.0))

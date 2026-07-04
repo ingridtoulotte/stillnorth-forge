@@ -642,8 +642,10 @@ class Pipeline:
                 break
             self._working("vid2", done + 1, len(stems))
             clip1 = self._clip_path("vid1", s)
-            letter = self.posemap[s].get("letter", s.split("_", 1)[0])
-            if clip1 and self._wan_continuation(base, wf, clip1, s, letter):
+            pm = self.posemap[s]
+            letter = pm.get("letter", s.split("_", 1)[0])
+            if clip1 and self._wan_continuation(base, wf, clip1, s, letter,
+                                                pm.get("pose"), pm.get("speed")):
                 done += 1
                 with self.lock:
                     self._save_state()
@@ -661,10 +663,12 @@ class Pipeline:
         except Exception:
             return 0
 
-    def _wan_continuation(self, base, wf, clip1_path, stem, letter):
+    def _wan_continuation(self, base, wf, clip1_path, stem, letter,
+                          pose=None, speed=None):
         n1 = self._clip_nframes(clip1_path) or 81
         ov = self.cfg.overlap_frames
         g = json.loads(json.dumps(base))
+        self._apply_render_res(g, wf)
         g["200"] = {"class_type": "VHS_LoadVideoPath",
                     "_meta": {"title": "clip1 tail"},
                     "inputs": {"video": clip1_path, "force_rate": 0.0,
@@ -678,7 +682,15 @@ class Pipeline:
             g[wf["node_length"]]["inputs"][wf["field_length"]] = \
                 int(self.cfg.continuation_length)
         if self.cfg.continuation_drop_camera:
+            # legacy mode: inherit motion from the seeded frames only. Proven
+            # to go near-static on pans/zooms (flow ~0.1-0.5x of clip1) ->
+            # visible slow-down at the seam. Default is now camera-kept.
             g[wf["node_wci2v"]]["inputs"].pop(wf["field_camera_cond"], None)
+        elif pose is not None:
+            # camera-kept continuation: same pose/speed as clip1 so the move
+            # carries through the cut at full rate.
+            g[wf["node_camera"]]["inputs"][wf["field_pose"]] = pose
+            g[wf["node_camera"]]["inputs"][wf["field_speed"]] = speed
         g[wf["node_seed"]]["inputs"][wf["field_seed"]] = random.randint(0, 2**31 - 1)
         g[wf["node_save"]]["inputs"][wf["field_save"]] = \
             self.cfg.comfy_prefix("vid2", stem)
@@ -764,6 +776,14 @@ class Pipeline:
             self._tick("final_up", done, len(stems))
         return done
 
+    def _apply_render_res(self, g, wf):
+        """Inject the configured Wan render resolution into the camera
+        embedding node (which feeds width/height to the sampler). 0 = keep
+        whatever the workflow export carries."""
+        if self.cfg.wan_width and self.cfg.wan_height:
+            g[wf["node_camera"]]["inputs"]["width"] = self.cfg.wan_width
+            g[wf["node_camera"]]["inputs"]["height"] = self.cfg.wan_height
+
     # -- Wan clip submit (shared by vid1 + vid2) ---------------------------
     def _wan_clip(self, base, wf, src_dir, stem, letter, pose, speed, out_stage,
                   length=None):
@@ -776,6 +796,7 @@ class Pipeline:
             self._log(f"{out_stage} stage FAIL {stem}: {e}")
             return False
         g = json.loads(json.dumps(base))
+        self._apply_render_res(g, wf)
         g[wf["node_image"]]["inputs"][wf["field_image"]] = stem + ".png"
         g[wf["node_text"]]["inputs"][wf["field_text"]] = self.cfg.motion_text(letter)
         g[wf["node_camera"]]["inputs"][wf["field_pose"]] = pose
