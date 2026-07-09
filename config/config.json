@@ -62,7 +62,7 @@
   "final_upscaler": "esrgan",
   "esrgan_bin": "C:/Program Files/Upscayl/resources/bin/upscayl-bin.exe",
   "esrgan_models_dir": "C:/Program Files/Upscayl/resources/models",
-  "esrgan_model": "upscayl-standard-4x",
+  "esrgan_model": "remacri-4x",
   "final_height": 2160,
   "final_unsharp": "5:5:0.9:5:5:0.0",
   "final_grain": "",

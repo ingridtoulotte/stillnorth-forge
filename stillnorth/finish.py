@@ -655,17 +655,18 @@ def _progressive_contrast(files, cfg):
         cv2.imwrite(files[i], np.clip(f, 0, 255).astype("uint8"))
 
 
-def _detail_hold(files, cfg):
-    """Hold fine-detail level constant across the clip, in place, BEFORE
-    super-res. Wan progressively melts high-frequency texture over a long
-    clip (~-15% Laplacian variance at 720p by the tail, which Real-ESRGAN
-    then amplifies to a ~-30% perceived drop at 4K). Measures per-frame
-    sharpness, smooths the curve, and applies an adaptive unsharp whose
-    strength grows exactly as much as the measured decay -- early frames are
-    untouched, late frames get progressively restored toward the clip's own
-    early-window baseline. Feeding the SR model detail-held frames is far
-    more effective than sharpening after SR, because ESRGAN rewards sharp
-    input nonlinearly."""
+def _detail_hold(files, cfg, sigma=1.2):
+    """Hold fine-detail level constant across the clip, in place. Wan
+    progressively melts high-frequency texture over a long clip, and the
+    continuation half comes out of gold_join with less high-frequency
+    energy (retime/blend), which Real-ESRGAN amplifies into a visible
+    sharpness step at the seam even when the 720p input measures flat.
+    Measures per-frame sharpness, smooths the curve, and applies an
+    adaptive unsharp whose strength grows exactly as much as the measured
+    decay -- frames at the clip's own early-window baseline are untouched,
+    softer frames get progressively restored. Run on the SUPER-RES output
+    frames (what the viewer actually sees), with a sigma scaled to the
+    frame size by the caller."""
     np, cv2 = _np_cv2()
 
     def sharp(p):
@@ -676,7 +677,10 @@ def _detail_hold(files, cfg):
         return cv2.Laplacian(g, cv2.CV_64F).var()
 
     S = _smooth_curve([sharp(p) for p in files])
-    base = float(np.median(S[:min(16, len(S))]))
+    # anchor to the clip's own best level (p80), not the first frames --
+    # clips routinely START soft (Wan warms up out of the still) and sag
+    # again after the seam; both ends get lifted toward the clip's peak.
+    base = float(np.percentile(S, 80))
     cap = float(getattr(cfg, "detail_hold_max", 1.5))
     for i, p in enumerate(files):
         gain = min(cap, max(1.0, (base / max(S[i], 1.0)) ** 0.7))
@@ -684,7 +688,7 @@ def _detail_hold(files, cfg):
         if a < 0.02:
             continue
         f = cv2.imread(p).astype(np.float32)
-        blur = cv2.GaussianBlur(f, (0, 0), 1.2)
+        blur = cv2.GaussianBlur(f, (0, 0), sigma)
         cv2.imwrite(p, np.clip(f + a * (f - blur), 0, 255).astype("uint8"))
 
 
@@ -839,8 +843,6 @@ def esrgan_finish(cfg, src, dst):
                    if cfg.esrgan_saturation_match else None)
         if cfg.contrast_flatten:
             _progressive_contrast(files, cfg)
-        if getattr(cfg, "detail_hold", True):
-            _detail_hold(files, cfg)
         if subprocess.run([cfg.esrgan_bin, "-i", inF, "-o", outF, "-n",
                            cfg.esrgan_model, "-m", cfg.esrgan_models_dir,
                            "-s", "4", "-f", "png"],
@@ -868,9 +870,29 @@ def esrgan_finish(cfg, src, dst):
         if getattr(cfg, "final_grade", ""):
             chain.append(cfg.final_grade)
         vf = ",".join(chain)
-        return _run([cfg.ffmpeg, "-y", "-loglevel", "error", "-framerate",
+        if not getattr(cfg, "detail_hold", True):
+            return _run([cfg.ffmpeg, "-y", "-loglevel", "error", "-framerate",
+                         str(out_fps), "-i", os.path.join(outF, "f%05d.png"),
+                         "-vf", vf] + _codec(cfg, cfg.final_cq) + [dst]) \
+                and os.path.exists(dst)
+        # detail_hold: render the full chain to final-resolution frames
+        # first, equalise the sharpness the viewer ACTUALLY sees (measuring
+        # any earlier -- on the pre-SR or pre-downscale frames -- misses the
+        # seam sharpness step that only materialises after unsharp+scale),
+        # then encode.
+        finF = os.path.join(tmp, "fin")
+        os.makedirs(finF)
+        if not _run([cfg.ffmpeg, "-y", "-loglevel", "error", "-framerate",
                      str(out_fps), "-i", os.path.join(outF, "f%05d.png"),
-                     "-vf", vf] + _codec(cfg, cfg.final_cq) + [dst]) \
+                     "-vf", vf, os.path.join(finF, "f%05d.png")]):
+            return False
+        fin_files = sorted(glob.glob(os.path.join(finF, "*.png")))
+        if not fin_files:
+            return False
+        _detail_hold(fin_files, cfg, sigma=2.0)
+        return _run([cfg.ffmpeg, "-y", "-loglevel", "error", "-framerate",
+                     str(out_fps), "-i", os.path.join(finF, "f%05d.png")]
+                    + _codec(cfg, cfg.final_cq) + [dst]) \
             and os.path.exists(dst)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
