@@ -54,7 +54,8 @@ All four are broad, realistic and loopable so a single prompt fits every image i
 
 **ESRGAN finish (default `final_upscaler: esrgan`, `finish.esrgan_finish`).** Real detail, not the soft lanczos chain:
 
-1. **Per-frame contrast de-drift** (`contrast_flatten`, default on) — Wan drifts toward higher contrast/saturation over a continuation (a "neon" end). The finisher fits the linear **trend** of per-frame luma-std + saturation and corrects *against the trend* — gentle early, **stronger toward the end** — so the drift is removed while each frame keeps its natural variation. Target = clip 1's level × `contrast_target_boost` (1.05) / `saturation_target_boost` (1.02).
+1. **Per-frame contrast de-drift** (`contrast_flatten`, default on) — Wan drifts toward higher contrast/saturation over a continuation (a "neon" end). The finisher corrects against the **smoothed measured curve** of per-frame luma-std + saturation (not a linear fit — Wan's drift rises then eases, and a straight line left +10 % saturation swing in real masters) so the drift is removed while each frame keeps its natural variation. Target = clip 1's level × `contrast_target_boost` / `saturation_target_boost`.
+1b. **Detail hold** (`detail_hold`, default on) — Wan progressively melts high-frequency texture over a clip (~-15 % Laplacian variance at 720p, which super-res amplifies to ~-30 % perceived at 4K — trees turn painterly). Before super-res, late frames get an adaptive unsharp that holds the clip's fine-detail level at its own early-window baseline (`detail_hold_max` caps the gain). Pairs with **`seed_restore`** (default on): the continuation is seeded with a detail-restored copy of clip 1's tail instead of the raw (already melted) frames — Wan carries its seed's detail level through the whole continuation, measured **+60 % sharper continuation** on matched-seed A/B at zero extra render time.
 2. **Real-ESRGAN** per-frame super-res via Upscayl (`esrgan_model: upscayl-standard-4x` — `ultramix-balanced-4x` fabricates a wire-mesh texture on open meadows, `remacri-4x` goes neon), then scale to **UHD `final_height` (2160)** + crisp unsharp + light grain + a gentle final grade (`final_grade`, default `eq=contrast=0.93:gamma=1.04:saturation=0.97` — eases the FLUX-inherited punchy tone; `""` = off). The upscaler can't invent detail past the generation res, which is why `wan_width`/`wan_height` default to **1280×720**: 720p base × 4 = exact 3840×2160 and measured **+47–92 % sharper 2160p masters** vs the old 1104×624 (at ~+65 % render time). Drop back to 1104×624 for faster drafts.
 
 Set `final_upscaler: lanczos` to fall back to the cheap ffmpeg chain on a box without the Upscayl binary. `continuation_mode: single_frame` restores the old single-still continuation (`clip2_color_match`, `trim_start_frames`, `clip2_sharpen` apply only in that mode).
@@ -137,22 +138,31 @@ python -m stillnorth nodes workflows\image_flux2_text_to_image.json   # find nod
 Every rendered artefact is inspected by a local vision model (default
 `huihui_ai/Qwen3.6-abliterated:35b` via Ollama) — no cloud, no cost:
 
-- **FLUX stills** — judged right after render for incoherence (duplicated
-  patches, melted regions, broken geometry, floating fragments, text).
-  A reject **deletes the image** and the next pass regenerates it with a
-  fresh seed (up to `max_image_retries`, then the last render is accepted
-  so one stubborn prompt can't stall the batch).
-- **Finished masters** — a CV temporal-coherence gate (frame-to-frame
-  shimmer + texture instability, catches "objects jumping" flicker a VLM
-  can't see) plus 3 frames sampled at a random point sent to the model
-  for content-coherence. A reject moves the master to **`10_review/`**
-  (kept for your eyes, visible as a gallery tab) and deletes the whole
-  chain including the FLUX still, so a completely fresh chain regenerates
-  (up to `max_video_retries`, then the key is abandoned).
+- **FLUX stills** — the heavy gate. Gate 1 is deterministic CV
+  **animate-risk**: a bright desaturated texture-free fog/cloud mass
+  covering more than `fog_cover_max` (0.28) of the frame rejects (Wan
+  animates big soft fog banks and smears whatever they pass over), and an
+  outright blurry render below `image_min_sharp` rejects. Gate 2 is the
+  VLM incoherence check (duplicated patches, melted regions, broken
+  geometry, floating fragments, text). A reject **deletes the image** and
+  the next pass regenerates it with a fresh seed (up to
+  `max_image_retries`, then the last render is accepted so one stubborn
+  prompt can't stall the batch). Quality steering lives HERE, where a
+  reject costs seconds — not after 14 minutes of video render.
+- **Finished masters** — by default (`video_check: "cv"`) only the cheap
+  CV temporal-coherence gate runs (frame-to-frame shimmer + texture
+  instability, catches "objects jumping" flicker a VLM can't see); the
+  slow VLM master check is off. Set `video_check: "full"` to add the
+  3-frame VLM content-coherence pass, or `false` to disable master
+  checks entirely. A reject moves the master to **`10_review/`** (kept
+  for your eyes, visible as a gallery tab) and deletes the whole chain
+  including the FLUX still, so a completely fresh chain regenerates (up
+  to `max_video_retries`, then the key is abandoned).
 
 Ollama being down never blocks the batch — items pass unjudged and it is
 noted in the log. Tune it in the `judge` block of `config/config.json`
-(`enabled`, `video_check`, `model`, retries, `shimmer_max`/`instab_max`).
+(`enabled`, `video_check`, `model`, retries, `shimmer_max`/`instab_max`,
+`fog_cover_max`, `image_min_sharp`).
 
 ## 🎯 Run modes
 

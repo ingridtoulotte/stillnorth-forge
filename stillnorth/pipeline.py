@@ -997,12 +997,27 @@ class Pipeline:
         ov = self.cfg.overlap_frames
         g = json.loads(json.dumps(base))
         self._apply_render_res(g, wf)
+        seed_path, skip = clip1_path, max(0, n1 - ov)
+        restored = None
+        if self.cfg.seed_restore:
+            # Wan holds the detail level of its seed frames for the whole
+            # continuation: seed with a detail-restored tail instead of the
+            # raw (already melted) one. Measured +60% sharpness across the
+            # full continuation on matched-seed A/B, no extra render time.
+            seed_dir = os.path.join(self.cfg.workspace, "_seed_cache")
+            os.makedirs(seed_dir, exist_ok=True)
+            restored = os.path.join(seed_dir, f"{stem}_tail.mp4")
+            if finish.restore_tail(self.cfg, clip1_path, restored, ov):
+                seed_path, skip = restored, 0
+            else:
+                self._log(f"vid2 seed-restore failed {stem} — raw tail used")
+                restored = None
         g["200"] = {"class_type": "VHS_LoadVideoPath",
                     "_meta": {"title": "clip1 tail"},
-                    "inputs": {"video": clip1_path, "force_rate": 0.0,
+                    "inputs": {"video": seed_path, "force_rate": 0.0,
                                "custom_width": 0, "custom_height": 0,
                                "frame_load_cap": ov,
-                               "skip_first_frames": max(0, n1 - ov),
+                               "skip_first_frames": skip,
                                "select_every_nth": 1}}
         g[wf["node_wci2v"]]["inputs"][wf["field_start_image"]] = ["200", 0]
         g[wf["node_text"]]["inputs"][wf["field_text"]] = self.cfg.motion_text(letter)
@@ -1023,6 +1038,11 @@ class Pipeline:
         g[wf["node_save"]]["inputs"][wf["field_save"]] = \
             self.cfg.comfy_prefix("vid2", stem)
         ok, msg = self._submit(g, self.cfg.timeout_vid, "vid2")
+        if restored:
+            try:
+                os.remove(restored)
+            except OSError:
+                pass
         if ok and comfymod.rename_out(self.cfg.stage_dir("vid2"), stem,
                                       (".mp4", ".webm")):
             return True
