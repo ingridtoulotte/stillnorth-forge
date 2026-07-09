@@ -67,7 +67,17 @@ $("file").addEventListener("change", (e) => ingestFiles(e.target.files));
 dz.addEventListener("drop", (e) => ingestFiles(e.dataTransfer.files));
 
 // ---- controls -------------------------------------------------------------
-async function runPipeline() { const r = await api("/api/run", {}); toast(r.started ? "pipeline running" : "already running"); refresh(); }
+async function runPipeline() {
+  const target = parseInt($("mode-target").value, 10) || null;
+  const minutes = target ? null : (parseFloat($("mode-minutes").value) || null);
+  const r = await api("/api/run", { target, minutes });
+  const mode = target ? `until ${target} accepted vids` : minutes ? `for ${minutes} min` : "full set";
+  toast(r.started ? `pipeline running — ${mode}` : "already running");
+  refresh();
+}
+// the two mode inputs are alternatives: filling one clears the other
+$("mode-target").addEventListener("input", () => { if ($("mode-target").value) $("mode-minutes").value = ""; });
+$("mode-minutes").addEventListener("input", () => { if ($("mode-minutes").value) $("mode-target").value = ""; });
 async function cancelPipeline() { await api("/api/cancel", {}); toast("pausing after current item…"); }
 async function clearQueue() {
   if (!confirm("Clear the queued prompts? Rendered files are KEPT on disk (use Purge to delete them).")) return;
@@ -172,6 +182,15 @@ async function refresh() {
   queueData = s.queue || []; renderQueue();
   $("run").disabled = !!s.running;
   $("run").textContent = s.running ? "● running" : "▶ Run / Resume";
+
+  // mode / judge status line
+  const md = s.mode || {};
+  let mtxt = "";
+  if (md.kind === "target") mtxt = `🎯 ${md.accepted ?? 0} / ${md.target} accepted`;
+  else if (md.kind === "time" && s.running) mtxt = `⏲ ${fmtDur(md.seconds_left ?? 0)} left · ${md.accepted ?? 0} accepted`;
+  if (md.review) mtxt += `${mtxt ? " · " : ""}⚠ ${md.review} in review`;
+  if (md.judge === false) mtxt += `${mtxt ? " · " : ""}judge off`;
+  $("mode-status").textContent = mtxt;
   paintClock();
 }
 
@@ -214,7 +233,8 @@ $("log-copy").addEventListener("click", async () => {
 
 // ---- output gallery -------------------------------------------------------
 let galData = {}, galStage = localStorage.getItem("snf-gal") || "final_up";
-$("gal-tabs").innerHTML = STAGES.map(([k, label]) =>
+const GAL_STAGES = STAGES.concat([["review", "⚠ Review"]]);
+$("gal-tabs").innerHTML = GAL_STAGES.map(([k, label]) =>
   `<button class="gal-tab" data-stage="${k}">${label}</button>`).join("");
 $("gal-tabs").addEventListener("click", (e) => {
   const b = e.target.closest(".gal-tab"); if (!b) return;

@@ -117,7 +117,7 @@ cd stillnorth-forge
 
 # 1. (optional) point config/config.json at your machine — see below
 # 2. make sure ComfyUI is running
-.\scripts\run.ps1          # opens http://127.0.0.1:8787 in your browser
+.\scripts\run.ps1          # opens http://127.0.0.1:8790 in your browser
 ```
 
 Then: **drag your HTML files onto the page → press Run**. That's it. You can drop more HTML files at any time, even mid-batch — they flow in from the FLUX stage on the next pass.
@@ -130,9 +130,51 @@ python -m stillnorth --no-browser    # headless
 python -m stillnorth nodes workflows\image_flux2_text_to_image.json   # find node ids
 ```
 
+## 🤖 AI judge (local Ollama)
+
+Every rendered artefact is inspected by a local vision model (default
+`huihui_ai/Qwen3.6-abliterated:35b` via Ollama) — no cloud, no cost:
+
+- **FLUX stills** — judged right after render for incoherence (duplicated
+  patches, melted regions, broken geometry, floating fragments, text).
+  A reject **deletes the image** and the next pass regenerates it with a
+  fresh seed (up to `max_image_retries`, then the last render is accepted
+  so one stubborn prompt can't stall the batch).
+- **Finished masters** — a CV temporal-coherence gate (frame-to-frame
+  shimmer + texture instability, catches "objects jumping" flicker a VLM
+  can't see) plus 3 frames sampled at a random point sent to the model
+  for content-coherence. A reject moves the master to **`10_review/`**
+  (kept for your eyes, visible as a gallery tab) and deletes the whole
+  chain including the FLUX still, so a completely fresh chain regenerates
+  (up to `max_video_retries`, then the key is abandoned).
+
+Ollama being down never blocks the batch — items pass unjudged and it is
+noted in the log. Tune it in the `judge` block of `config/config.json`
+(`enabled`, `video_check`, `model`, retries, `shimmer_max`/`instab_max`).
+
+## 🎯 Run modes
+
+- **vids wanted (N)** — the run keeps regenerating (replacing judge-rejected
+  images and remaking reviewed vids) until exactly **N accepted masters**
+  sit in the output, then stops. Only the needed number of chains is in
+  flight at once, most-advanced first.
+- **time budget (minutes)** — produce as many accepted masters as possible
+  in the window, then stop (the item being rendered is finished, not
+  killed). Chains run in small waves so clips actually complete instead of
+  the whole prompt set camping in the FLUX stage.
+- **neither** — classic behaviour: process every queued prompt.
+
+## 📥 HTML auto-load
+
+Drop your prompt `.html` files into **`<workspace>/00_html_prompts/`** —
+the worker scans the folder on every pass (new or edited files, tracked by
+mtime) and ingests them automatically. No UI upload needed; the drag-drop
+zone still works too.
+
 ## The UI
 
 - **Drag-and-drop zone** — one or many `.html` files; add more anytime.
+- **Run-mode inputs** — `🎯 vids wanted` / `⏲ time budget (min)` next to Run (leave both empty for the classic full-set run); a status line shows `accepted / target`, time left, and the review count.
 - **Run / Resume** (`R`), **Cancel** (`C`; pause, resumable), **Clear queue** (forget pending prompts, **keep** rendered media), **Purge outputs** (destructive — **delete** every rendered image/clip and reset to a clean slate).
 - **Left sidebar** — live stats (prompts in set, finished masters, elapsed, avg/item, stage ETA, failures), VRAM gauge, the output-folder path (with copy), and the environment health pills.
 - **🎞 Long-video assembler** — duration buttons (15 min → 12 h), a fresh-vs-reused **clip mix** with ◀ ▶ steppers, live usage-bucket counts, build progress, finished-compilation list, and a Clean-now button. See [above](#-long-video-assembler).
@@ -158,8 +200,8 @@ Everything tunable lives in `config/` — no Python edits needed.
 Outputs are written under `"<ComfyUI output>/StillNorthForge/"` in numbered per-stage folders:
 
 ```
-01_flux  02_flux_up2  03_classified  04_vid1  05_lastframe
-06_lastframe_up4  07_vid2  08_concat  09_final_up4
+00_html_prompts  01_flux  02_flux_up2  03_classified  04_vid1  05_lastframe
+06_lastframe_up4  07_vid2  08_concat  09_final_up4  10_review
 forge_state.json   forge.log   assembler_state.json   _assembler_cache/
 ```
 

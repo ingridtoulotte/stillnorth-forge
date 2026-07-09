@@ -4,9 +4,23 @@
   "comfy_input_dir": "D:/IA_PROJET/System/ComfyUI/input",
   "comfy_output_dir": "D:/IA_PROJET/System/ComfyUI/output",
   "workspace_subdir": "StillNorthForge",
+  "html_prompts_dir": "",
+
+  "judge": {
+    "enabled": true,
+    "video_check": true,
+    "model": "huihui_ai/Qwen3.6-abliterated:35b",
+    "ollama_url": "http://127.0.0.1:11434",
+    "timeout": 300,
+    "max_image_retries": 3,
+    "max_video_retries": 2,
+    "keep_alive": "1m",
+    "shimmer_max": 3.5,
+    "instab_max": 0.15
+  },
 
   "server_host": "127.0.0.1",
-  "server_port": 8788,
+  "server_port": 8790,
 
   "render_timeout_img": 600,
   "render_timeout_vid": 1200,
@@ -54,7 +68,7 @@
   "final_upscaler": "esrgan",
   "esrgan_bin": "C:/Program Files/Upscayl/resources/bin/upscayl-bin.exe",
   "esrgan_models_dir": "C:/Program Files/Upscayl/resources/models",
-  "esrgan_model": "ultramix-balanced-4x",
+  "esrgan_model": "upscayl-standard-4x",
   "final_height": 2160,
   "final_unsharp": "5:5:0.9:5:5:0.0",
   "final_grain": "",

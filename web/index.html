@@ -74,8 +74,18 @@
           <div class="dz-icon">⬇</div>
           <p class="dz-title">Drop HTML prompt files here</p>
           <p class="dz-sub">or <button id="browse" class="link">browse</button> · add more anytime, even mid-batch</p>
+          <p class="dz-sub">auto-load: drop files into <code id="html-dir">00_html_prompts</code> in the output folder — they're picked up on every pass</p>
           <input id="file" type="file" accept=".html,.htm" multiple hidden />
         </div>
+      </div>
+      <div class="mode-row">
+        <label class="mode-field">🎯 vids wanted
+          <input id="mode-target" type="number" min="1" step="1" placeholder="all" />
+        </label>
+        <label class="mode-field">⏲ or time budget (min)
+          <input id="mode-minutes" type="number" min="1" step="1" placeholder="—" />
+        </label>
+        <span id="mode-status" class="mode-status"></span>
       </div>
       <div class="controls">
         <button id="run" class="btn primary">▶ Run / Resume</button>

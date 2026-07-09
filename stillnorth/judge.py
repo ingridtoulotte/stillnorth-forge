@@ -1,0 +1,246 @@
+"""Local-AI quality judge (Ollama vision model).
+
+Two checks, both MERCILESS by instruction — any hesitation is a reject:
+
+* judge_image(cfg, path)  — one FLUX still. Looks for semantic incoherence
+  (warped/melted structures, duplicated landforms, impossible geometry,
+  mangled objects, text/watermarks, obvious AI artifacts).
+* judge_video(cfg, path)  — one finished master. Samples 3 frames spanning
+  ~1s at a RANDOM point of the clip and asks whether the scene stays
+  coherent frame-to-frame (objects/shadows must not jump, warp, appear or
+  disappear).
+
+Design notes:
+* Local VLMs cannot see pixel-level texture defects (the vision encoder
+  downsizes the frame), so the judge targets composition-scale coherence
+  only; pixel quality is owned by the render/SR recipe and CV metrics.
+* Frames are downscaled to <=1024px before base64 — the encoder would do it
+  anyway, this just saves bandwidth and VRAM.
+* keep_alive is configurable (default 0) so the judge model releases VRAM
+  for FLUX/Wan as soon as a judging batch finishes.
+"""
+import base64
+import json
+import os
+import random
+import subprocess
+import tempfile
+import urllib.request
+
+# Calibrated on 16 real FLUX stills + synthetic defects (2026-07-09):
+# leading "defect checklist" prompts made every local VLM parrot the list and
+# reject 100% of clean images. The working shape is a NEUTRAL plausibility
+# question with a severity gate — NONE / MINOR / IMPOSSIBLE — where only
+# IMPOSSIBLE rejects, and natural repetition is explicitly ruled out
+# (uniform ripples/mist were the dominant false-positive source).
+IMAGE_PROMPT = (
+    "This is supposed to be a real photograph taken from a drone over "
+    "Nordic nature. Examine it carefully. Classify it:\n"
+    "- If it is plausible as real drone footage, reply exactly: NONE\n"
+    "- If something looks odd but could occur in a real photo, reply: "
+    "MINOR: <what>\n"
+    "- ONLY if something could absolutely not exist in a real photograph, "
+    "reply: IMPOSSIBLE: <what and where>\n"
+    "IMPORTANT: repetitive or uniform NATURAL patterns (ripples, waves, "
+    "grass, sand, mist, tree rows, sediment lines) occur in real nature "
+    "photos all the time and are NEVER impossible. IMPOSSIBLE is reserved "
+    "for things a photo editor would call broken: duplicated copy-pasted "
+    "rectangles, melted or smeared objects, geometry fused together, "
+    "floating disconnected fragments, text overlays, half-formed animals "
+    "or structures. One line only."
+)
+
+VIDEO_PROMPT = (
+    "These are 3 frames taken about half a second apart from ONE continuous "
+    "real drone shot over Nordic nature. The camera moves, so the framing "
+    "shifts slightly between frames — that is normal. Compare the frames "
+    "and classify the sequence:\n"
+    "- If it is plausible as continuous real footage, reply exactly: NONE\n"
+    "- If something looks odd but could still be real (lighting shift, "
+    "motion blur, parallax), reply: MINOR: <what>\n"
+    "- ONLY if the content breaks between frames in a way real footage "
+    "never could, reply: IMPOSSIBLE: <what and where>\n"
+    "IMPOSSIBLE is reserved for: objects or shadows that teleport or jump "
+    "to a different place, things that appear/disappear/duplicate between "
+    "frames, landforms that change shape, or an outright scene change. "
+    "One line only."
+)
+
+
+def _b64_image(path, max_side=1024):
+    """Read an image, downscale to max_side, return base64 PNG."""
+    try:
+        import cv2
+        img = cv2.imread(path)
+        if img is not None:
+            h, w = img.shape[:2]
+            m = max(h, w)
+            if m > max_side:
+                s = max_side / m
+                img = cv2.resize(img, (int(w * s), int(h * s)),
+                                 interpolation=cv2.INTER_AREA)
+            ok, buf = cv2.imencode(".png", img)
+            if ok:
+                return base64.b64encode(buf.tobytes()).decode()
+    except Exception:
+        pass
+    with open(path, "rb") as fh:               # fallback: send as-is
+        return base64.b64encode(fh.read()).decode()
+
+
+def _chat(cfg, prompt, images):
+    """One Ollama /api/chat round. Returns the raw text reply ('' on none).
+    Freeform (no format=json): the severity protocol parses by prefix, and
+    forced-JSON mode degraded both tested VLMs into boilerplate verdicts."""
+    body = json.dumps({
+        "model": cfg.judge_model,
+        "messages": [{"role": "user", "content": prompt, "images": images}],
+        "stream": False,
+        "think": False,
+        "options": {"temperature": 0},
+        "keep_alive": cfg.judge_keep_alive,
+    }).encode()
+    req = urllib.request.Request(cfg.ollama_url + "/api/chat", body,
+                                 {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=cfg.judge_timeout) as r:
+        return (json.load(r).get("message", {}).get("content") or "").strip()
+
+
+def _parse_verdict(text):
+    """Severity protocol: only an IMPOSSIBLE verdict rejects. An empty reply
+    counts as REJECT (the judge did not vouch for the frame); NONE/MINOR and
+    anything unclassifiable-but-worded pass — false rejects were measured to
+    be the dominant failure mode of local VLMs, not false passes."""
+    t = (text or "").strip()
+    if not t:
+        return False, "empty judge reply"
+    first = t.splitlines()[0].strip().upper()
+    if first.startswith("IMPOSSIBLE") or "\nIMPOSSIBLE:" in t.upper():
+        return False, t.replace("\n", " ")[:160]
+    return True, t.replace("\n", " ")[:160]
+
+
+def available(cfg):
+    """True if Ollama answers and the judge model is installed."""
+    try:
+        with urllib.request.urlopen(cfg.ollama_url + "/api/tags", timeout=5) as r:
+            models = [m.get("name", "") for m in json.load(r).get("models", [])]
+        want = cfg.judge_model
+        return any(m == want or m.split(":")[0] == want.split(":")[0]
+                   for m in models)
+    except Exception:
+        return False
+
+
+def judge_image(cfg, path):
+    """(ok, reason) for one FLUX still. Errors talking to Ollama do NOT
+    reject work (the batch must survive a stopped Ollama): they pass with a
+    logged reason instead."""
+    try:
+        ok, reason = _parse_verdict(_chat(cfg, IMAGE_PROMPT, [_b64_image(path)]))
+        return ok, reason
+    except Exception as e:
+        return True, f"judge unavailable ({e.__class__.__name__}) — passed unjudged"
+
+
+def _duration(cfg, path):
+    try:
+        out = subprocess.run(
+            [cfg.ffprobe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=60).stdout.strip()
+        return float(out.splitlines()[0])
+    except Exception:
+        return 0.0
+
+
+def sample_frames(cfg, path, n=3, spacing=0.5, rng=None):
+    """Extract n frames starting at a random point, `spacing` seconds apart.
+    Returns list of temp PNG paths (caller need not clean up — tempdir)."""
+    dur = _duration(cfg, path)
+    span = spacing * (n - 1)
+    lo, hi = 0.5, max(0.6, dur - span - 0.5)
+    t0 = (rng or random).uniform(lo, hi) if hi > lo else lo
+    d = tempfile.mkdtemp(prefix="snf_judge_")
+    out = []
+    for i in range(n):
+        p = os.path.join(d, f"f{i}.png")
+        r = subprocess.run(
+            [cfg.ffmpeg, "-y", "-loglevel", "error", "-ss", f"{t0 + i * spacing:.3f}",
+             "-i", path, "-frames:v", "1", p],
+            capture_output=True, timeout=120)
+        if r.returncode == 0 and os.path.exists(p):
+            out.append(p)
+    return out
+
+
+def flicker_metrics(path, scale_w=960, max_frames=200):
+    """Temporal-coherence CV metrics (higher = worse): mean |Δ| in the
+    frame regions optical flow calls static ('shimmer' — objects/shadows
+    jittering frame to frame) and the relative instability of a fixed
+    center box's Laplacian variance over time ('tex_instab'). This is what
+    actually catches per-frame jumping — a VLM shown sampled stills cannot
+    see it (verified on a known-jumpy master: VLM passed it, this didn't)."""
+    import cv2
+    import numpy as np
+    cap = cv2.VideoCapture(path)
+    prev = None
+    shimmer_vals, lapvars = [], []
+    n = 0
+    while n < max_frames:
+        ok, fr = cap.read()
+        if not ok:
+            break
+        h, w = fr.shape[:2]
+        if w > scale_w:
+            fr = cv2.resize(fr, (scale_w, int(h * scale_w / w)))
+        g8 = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
+        g = g8.astype(np.float32)
+        hh, ww = g8.shape
+        lapvars.append(cv2.Laplacian(
+            g8[hh // 4:3 * hh // 4, ww // 4:3 * ww // 4], cv2.CV_64F).var())
+        if prev is not None:
+            fl = cv2.calcOpticalFlowFarneback(prev, g, None,
+                                              0.5, 3, 15, 3, 5, 1.2, 0)
+            mag = np.sqrt(fl[..., 0] ** 2 + fl[..., 1] ** 2)
+            static = mag < 0.35
+            if static.sum() > 500:
+                shimmer_vals.append(float(np.abs(g - prev)[static].mean()))
+        prev = g
+        n += 1
+    cap.release()
+    lv = np.array(lapvars) if lapvars else np.array([0.0])
+    return {
+        "shimmer": float(np.mean(shimmer_vals)) if shimmer_vals else 0.0,
+        "tex_instab": float(lv.std() / max(lv.mean(), 1e-3)),
+        "frames": n,
+    }
+
+
+def judge_video(cfg, path, rng=None, spacing=0.5):
+    """(ok, reason) for one finished master. Two gates:
+    1. CV temporal coherence — shimmer AND texture instability must BOTH
+       exceed their thresholds to reject (single-signal spikes happen on
+       fast pans over fine texture; real per-frame jumping trips both).
+       Thresholds calibrated on user-verdicted masters: goods measured
+       <=3.01/<=0.10, jumping-shadows bad 4.17/0.21, SR-wire bad 3.79/0.22.
+    2. VLM semantic check — 3 frames at a random point, content coherence.
+    Ollama being down skips only gate 2 (CV gate always runs)."""
+    try:
+        fm = flicker_metrics(path)
+        if (fm["shimmer"] > cfg.judge_shimmer_max and
+                fm["tex_instab"] > cfg.judge_instab_max):
+            return False, (f"temporal flicker: shimmer {fm['shimmer']:.2f} "
+                           f"+ instability {fm['tex_instab']:.3f} "
+                           "(objects/texture jump between frames)")
+    except Exception:
+        pass                                     # CV gate is best-effort
+    frames = sample_frames(cfg, path, spacing=spacing, rng=rng)
+    if len(frames) < 3:
+        return True, "frame sampling failed — passed unjudged"
+    try:
+        imgs = [_b64_image(f) for f in frames]
+        ok, reason = _parse_verdict(_chat(cfg, VIDEO_PROMPT, imgs))
+        return ok, reason
+    except Exception as e:
+        return True, f"judge unavailable ({e.__class__.__name__}) — passed unjudged"
