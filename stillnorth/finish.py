@@ -771,6 +771,8 @@ def esrgan_finish(cfg, src, dst):
             chain.append(f"unsharp={cfg.final_unsharp}")
         if cfg.final_grain:
             chain.append(f"noise={cfg.final_grain}")
+        if getattr(cfg, "final_grade", ""):
+            chain.append(cfg.final_grade)
         vf = ",".join(chain)
         return _run([cfg.ffmpeg, "-y", "-loglevel", "error", "-framerate",
                      str(out_fps), "-i", os.path.join(outF, "f%05d.png"),

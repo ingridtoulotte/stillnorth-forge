@@ -47,7 +47,10 @@ IMAGE_PROMPT = (
     "for things a photo editor would call broken: duplicated copy-pasted "
     "rectangles, melted or smeared objects, geometry fused together, "
     "floating disconnected fragments, text overlays, half-formed animals "
-    "or structures. One line only."
+    "or structures, and distinct vertical COLUMNS of steam or smoke rising "
+    "from the ground like geysers or chimneys where nothing could produce "
+    "them (horizontal fog banks and valley mist are fine and normal). "
+    "One line only."
 )
 
 VIDEO_PROMPT = (
@@ -62,8 +65,11 @@ VIDEO_PROMPT = (
     "never could, reply: IMPOSSIBLE: <what and where>\n"
     "IMPOSSIBLE is reserved for: objects or shadows that teleport or jump "
     "to a different place, things that appear/disappear/duplicate between "
-    "frames, landforms that change shape, or an outright scene change. "
-    "One line only."
+    "frames, landforms that change shape, an outright scene change, large "
+    "soft cloudy blobs materialising out of nowhere or dissolving away, or "
+    "frames so blurry, smeared or low-resolution that no professional 4K "
+    "drone camera could have produced them (thin natural mist that stays "
+    "put is fine). One line only."
 )
 
 

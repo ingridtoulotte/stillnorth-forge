@@ -5,7 +5,6 @@
   "comfy_output_dir": "D:/IA_PROJET/System/ComfyUI/output",
   "workspace_subdir": "StillNorthForge",
   "html_prompts_dir": "",
-
   "judge": {
     "enabled": true,
     "video_check": true,
@@ -18,27 +17,22 @@
     "shimmer_max": 3.5,
     "instab_max": 0.15
   },
-
   "server_host": "127.0.0.1",
   "server_port": 8790,
-
   "render_timeout_img": 600,
   "render_timeout_vid": 1200,
   "poll_seconds": 2,
   "submit_retries": 2,
   "retry_backoff_seconds": 5,
-
   "image_upscale_mult": 2,
   "lastframe_upscale_mult": 4,
   "final_upscale_mult": 4,
-
   "continuation_seed": "native",
   "native_long": false,
   "native_long_frames": 161,
   "trim_start_frames": 3,
   "clip2_sharpen": "",
   "clip2_color_match": true,
-
   "continuation_mode": "native_overlap",
   "overlap_frames": 17,
   "continuation_length": 97,
@@ -55,16 +49,14 @@
   "band_dedrift": true,
   "seam_sharp_alpha_up": 1.0,
   "tail_ramp_pow": 0.5,
-  "wan_width": 1104,
-  "wan_height": 624,
-
+  "wan_width": 1280,
+  "wan_height": 720,
   "fps": 16,
   "video_cq": 19,
   "nvenc": true,
   "upscale_denoise": "",
   "upscale_sharp": "5:5:0.8:5:5:0.0",
   "upscale_grain": "",
-
   "final_upscaler": "esrgan",
   "esrgan_bin": "C:/Program Files/Upscayl/resources/bin/upscayl-bin.exe",
   "esrgan_models_dir": "C:/Program Files/Upscayl/resources/models",
@@ -80,13 +72,19 @@
   "saturation_target_boost": 1.0,
   "esrgan_color_match": true,
   "esrgan_saturation_match": true,
-
   "assembler": {
     "fade_seconds": 1.0,
     "target_height": 1080,
     "avg_clip_seconds": 10.0,
     "retention_days": 7,
     "autodelete_enabled": true,
-    "default_weights": {"0": 60, "1": 20, "2": 10, "3": 6, "4": 4}
-  }
+    "default_weights": {
+      "0": 60,
+      "1": 20,
+      "2": 10,
+      "3": 6,
+      "4": 4
+    }
+  },
+  "final_grade": "eq=contrast=0.93:gamma=1.04:saturation=0.97"
 }

@@ -1,5 +1,5 @@
 {
-  "_comment": "The CLIP classifier (stillnorth/classify.py, mirrored from tsn_classify.py) sorts each FLUX image by its CONTENT into A/B/C/D. Each content class is then animated with the Wan 2.2 motion prompt that physically fits that content. Edit the 'motion' strings freely -- they are sent verbatim to the Wan positive-prompt node. Keep them broad, realistic and loopable so one prompt fits every image in its class.",
+  "_comment": "The CLIP classifier (stillnorth/classify.py, mirrored from tsn_classify.py) sorts each FLUX image by its CONTENT into A/B/C/D. Each content class is then animated with the Wan 2.2 motion prompt that physically fits that content. Edit the 'motion' strings freely -- they are sent verbatim to the Wan positive-prompt node. IMPORTANT (2026-07-09): the sampler runs at cfg=1 (4-step Seko distill) so the NEGATIVE prompt is ignored -- the positive prompt is the ONLY steering. Never ask for volumetrics in motion (drifting fog, falling snow, rolling clouds): Wan renders those as soft blurry blobs that spawn/dissolve mid-clip and compound over the continuation. Describe camera glide + stable weather + sharp detail instead.",
 
   "poses": ["Pan Up", "Pan Left", "Pan Right", "Zoom In", "Zoom Out"],
   "speed_by_pose": {
@@ -9,19 +9,19 @@
   "classes": {
     "A": {
       "content": "aerial forest canopy / snowy plains (land only, no open water)",
-      "motion": "Slow low fog and soft cloud shadows drifting horizontally across a vast forest canopy, with fine snow gently falling through the air at varying depths. The treetops stay still while only the mist, shadows and light snow move. Continuous, seamless, perfectly loopable atmospheric motion with no start or end point."
+      "motion": "Smooth professional aerial drone footage gliding slowly over a vast forest canopy with gentle parallax. The scene stays exactly as it is: crisp, sharp, photorealistic, stable natural lighting, constant weather. Treetops sway almost imperceptibly. Any existing thin mist stays in place, calm and nearly still -- no new fog, no smoke, no haze thickening, nothing appears or disappears. Fine detail of branches, moss and terrain stays sharp and steady through the whole shot. High detail 4K nature documentary quality."
     },
     "B": {
       "content": "mountain ridges, peaks, drifting clouds and mist",
-      "motion": "Clouds and fog rolling slowly and horizontally across a mountain ridge and through the valley at a steady pace, undulating gently while revealing and concealing the terrain beneath. Continuous, seamless and loopable, with no defined leading or trailing edge."
+      "motion": "Smooth professional aerial drone footage gliding slowly along a mountain ridge with gentle parallax. Crisp, sharp, photorealistic, stable natural lighting, constant weather. The existing clouds and valley mist drift very slowly and keep their overall shape and coverage -- no new fog forming, no haze thickening, terrain never gets swallowed. Rock faces, snow patches and ridgelines keep their fine sharp detail steady through the whole shot. High detail 4K nature documentary quality."
     },
     "C": {
       "content": "rivers, lakes and open liquid water with reflections",
-      "motion": "Calm open water moving gently -- a steady current with visible eddies and subtle surface ripples on a broad river bend, while thin ground mist drifts just above the glass-smooth water reflecting the treeline. Constant, gentle and perfectly loopable, with no beginning or end point."
+      "motion": "Smooth professional aerial drone footage gliding slowly over calm water with gentle parallax. Crisp, sharp, photorealistic, stable natural lighting, constant weather. The water moves gently -- a steady current with subtle surface ripples and soft reflections -- while the banks and treeline stay sharp and steady. No new mist forming, no haze thickening, nothing appears or disappears. High detail 4K nature documentary quality."
     },
     "D": {
       "content": "glaciers, frozen lakes, arctic ice and snow-covered ground",
-      "motion": "Heavy snowfall over a frozen arctic landscape seen from an elevated vantage -- individual snowflakes fall diagonally across the frame at varying depths, creating parallax layers as fresh white settles over the ice below. A continuous gentle cascade, fully loopable, with no start or stop."
+      "motion": "Smooth professional aerial drone footage gliding slowly over a frozen arctic landscape with gentle parallax. Crisp, sharp, photorealistic, stable natural lighting, constant clear weather. Ice, snow crust and meltwater channels glisten subtly as the viewpoint moves; every crack and texture in the ice keeps its fine sharp detail steady through the whole shot. No falling snow, no fog, no haze, nothing appears or disappears. High detail 4K nature documentary quality."
     }
   }
 }
