@@ -227,7 +227,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"added": added, "found": found,
                                     "total": len(pipe.prompts)})
         if self.path == "/api/run":
-            started = pipe.start()
+            d = self._body()
+            try:
+                target = int(d.get("target") or 0) or None
+                minutes = float(d.get("minutes") or 0) or None
+            except (TypeError, ValueError):
+                return self._send(400, {"error": "bad target/minutes"})
+            started = pipe.start(target=target, minutes=minutes)
             return self._send(200, {"started": started})
         if self.path == "/api/cancel":
             pipe.cancel()

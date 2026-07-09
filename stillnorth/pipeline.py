@@ -27,6 +27,7 @@ import traceback
 
 from .config import get_config, STAGE_DIRS
 from . import comfy as comfymod
+from . import judge as judgemod
 from . import media
 from . import finish
 from . import html_prompts
@@ -49,7 +50,14 @@ STAGE_LABELS = {
     "lf_up": "upscaling the lastframes (1st vid)",
     "vid2": "2nd vid batch", "concat": "concatenating clips",
     "final_up": "final upscale",
+    "judge_flux": "AI-judging flux images",
+    "judge_final": "AI-judging finished vids",
 }
+
+# chain-completion waves: in target/time-budget mode only this many keys are
+# in flight at once, most-advanced first, so chains reach the master stage
+# instead of the whole prompt set camping in the flux stage.
+WAVE_SIZE = 4
 
 
 class Pipeline:
@@ -64,6 +72,18 @@ class Pipeline:
         self.posemap = {}    # stem(<letter>_<key>) -> {letter, pose, speed}
         self.metrics = {}    # stage -> {n, fail, t, min, max}  (per-stage timing)
         self.desired_running = False  # crash-safe intent: auto-resume on launch
+        # AI-judge bookkeeping (all persisted)
+        self.judged = {}       # key  -> True   (flux still accepted)
+        self.img_rejects = {}  # key  -> reject count so far
+        self.vid_judged = {}   # stem -> True/False (master verdict)
+        self.vid_rejects = {}  # key  -> master remake count so far
+        self.abandoned = []    # keys given up after too many master rejects
+        self.html_seen = {}    # basename -> mtime of auto-ingested HTML files
+        # run mode: None = classic run-everything; {"target": N} = stop after
+        # N accepted masters; {"deadline": epoch} = stop when time is up.
+        self.mode = None
+        self._active = None    # per-pass active key set (None = no limit)
+        self._judge_on = False # judge reachable this pass (checked once)
         self.status = {
             "running": False, "stage": "idle", "label": "idle",
             "percent": 0, "stage_done": 0, "stage_total": 0,
@@ -82,6 +102,13 @@ class Pipeline:
                 self.posemap = d.get("posemap", {})
                 self.metrics = d.get("metrics", {})
                 self.desired_running = bool(d.get("desired_running", False))
+                self.judged = d.get("judged", {})
+                self.img_rejects = d.get("img_rejects", {})
+                self.vid_judged = d.get("vid_judged", {})
+                self.vid_rejects = d.get("vid_rejects", {})
+                self.abandoned = d.get("abandoned", [])
+                self.html_seen = d.get("html_seen", {})
+                self.mode = d.get("mode")
             except Exception:
                 pass
 
@@ -93,7 +120,13 @@ class Pipeline:
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({"prompts": self.prompts, "letters": self.letters,
                        "posemap": self.posemap, "metrics": self.metrics,
-                       "desired_running": self.desired_running}, fh, indent=1)
+                       "desired_running": self.desired_running,
+                       "judged": self.judged, "img_rejects": self.img_rejects,
+                       "vid_judged": self.vid_judged,
+                       "vid_rejects": self.vid_rejects,
+                       "abandoned": self.abandoned,
+                       "html_seen": self.html_seen,
+                       "mode": self.mode}, fh, indent=1)
         os.replace(tmp, p)
 
     def _log(self, msg):
@@ -103,7 +136,12 @@ class Pipeline:
                 fh.write(line + "\n")
         except Exception:
             pass
-        print(line, flush=True)
+        try:
+            print(line, flush=True)
+        except UnicodeEncodeError:
+            # Windows cp1252 console can't print ✓/em-dash etc — degrade,
+            # never let a log line kill the worker thread.
+            print(line.encode("ascii", "replace").decode(), flush=True)
 
     # -- public API ---------------------------------------------------------
     def ingest_html(self, name, text):
@@ -138,6 +176,19 @@ class Pipeline:
             st["cancel"] = self.cancel_flag
             st["metrics"] = self._metrics_view()
             st["desired_running"] = self.desired_running
+            m = self.mode or {}
+            st["mode"] = {
+                "kind": ("target" if m.get("target")
+                         else "time" if m.get("deadline") else "all"),
+                "target": m.get("target"),
+                "minutes": m.get("minutes"),
+                "seconds_left": (max(0, int(m["deadline"] - time.time()))
+                                 if m.get("deadline") else None),
+                "accepted": self.accepted_count(),
+                "review": self._count("review"),
+                "abandoned": len(self.abandoned),
+                "judge": bool(self.cfg.judge_enabled),
+            }
         try:
             st["library"] = lib.bucket_counts(self.cfg)   # masters incl. used buckets
         except Exception:
@@ -174,11 +225,26 @@ class Pipeline:
             by_src[v["src"]] = by_src.get(v["src"], 0) + 1
         return [{"src": k, "prompts": n} for k, n in sorted(by_src.items())]
 
-    def start(self):
-        """Start the worker if not already running (idempotent)."""
+    def start(self, target=None, minutes=None):
+        """Start the worker if not already running (idempotent).
+
+        target  — stop once this many masters have been produced AND accepted
+                  by the AI judge (rejected chains are remade with new prompts
+                  or new seeds until the count is reached or prompts run out).
+        minutes — time budget: produce as many accepted masters as possible,
+                  then stop (the item being rendered is finished, not killed).
+        Neither — classic behaviour: process every queued prompt.
+        """
         with self.lock:
             if self._thread and self._thread.is_alive():
                 return False
+            if target:
+                self.mode = {"target": int(target)}
+            elif minutes:
+                self.mode = {"deadline": time.time() + float(minutes) * 60,
+                             "minutes": float(minutes)}
+            else:
+                self.mode = None
             self.cancel_flag = False
             self.desired_running = True       # remember intent across restarts
             self._save_state()
@@ -186,6 +252,73 @@ class Pipeline:
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
             return True
+
+    # -- mode helpers --------------------------------------------------------
+    def _time_up(self):
+        m = self.mode
+        return bool(m and m.get("deadline") and time.time() >= m["deadline"])
+
+    def _should_stop(self):
+        """Checked between items inside every stage loop: an explicit pause
+        and an expired time budget both stop AFTER the current item."""
+        return self.cancel_flag or self._time_up()
+
+    def accepted_count(self):
+        """Masters produced AND accepted. With the video judge on, only
+        judged-OK masters count; otherwise any existing master does."""
+        if self.cfg.judge_enabled and self.cfg.judge_video_enabled:
+            return sum(1 for v in self.vid_judged.values() if v)
+        return self._count("final_up")
+
+    def _target_reached(self):
+        m = self.mode
+        return bool(m and m.get("target") and
+                    self.accepted_count() >= m["target"])
+
+    def _key_progress(self, key):
+        """How far key's chain has got (higher = closer to a master)."""
+        stem = f"{self.letters.get(key, '')}_{key}" if key in self.letters else None
+        if stem:
+            for rank, stage in ((6, "final_up"), (5, "concat"), (4, "vid2"),
+                                (3, "vid1")):
+                if self._exists(stage, stem, video=True):
+                    return rank
+            if self._classified_exists(key):
+                return 2
+        if self._exists("img_up", key):
+            return 2
+        if self._exists("flux", key):
+            return 1
+        return 0
+
+    def _key_finished(self, key):
+        stem = f"{self.letters.get(key, '')}_{key}"
+        if key in self.letters and self.vid_judged.get(stem):
+            return True
+        if not (self.cfg.judge_enabled and self.cfg.judge_video_enabled):
+            return (key in self.letters and
+                    (self._exists("final_up", stem, video=True) or
+                     lib.master_exists(self.cfg, stem)))
+        return False
+
+    def _pick_active(self):
+        """Per-pass active key set. None = no limit (classic mode). In target
+        mode the set holds exactly the still-needed number of chains; in
+        time-budget mode a small wave, so chains finish instead of the whole
+        prompt set camping in the flux stage. Most-advanced chains first."""
+        if not self.mode:
+            return None
+        if self.mode.get("target"):
+            n = max(0, self.mode["target"] - self.accepted_count())
+        else:
+            n = WAVE_SIZE
+        cand = [k for k in self.prompts
+                if k not in self.abandoned and not self._key_finished(k)]
+        cand.sort(key=self._key_progress, reverse=True)
+        return set(cand[:n])
+
+    def _allowed(self, key):
+        return self._active is None or key in self._active
 
     def maybe_auto_resume(self):
         """Called once on launch. If the batch was running when the terminal
@@ -238,6 +371,13 @@ class Pipeline:
             self.prompts = {}
             self.letters = {}
             self.posemap = {}
+            self.judged = {}
+            self.img_rejects = {}
+            self.vid_judged = {}
+            self.vid_rejects = {}
+            self.abandoned = []
+            self.html_seen = {}   # files still in the folder re-ingest on Run
+            self.mode = None
             self._save_state()
         self._log("queue cleared")
 
@@ -266,6 +406,13 @@ class Pipeline:
             self.letters = {}
             self.posemap = {}
             self.metrics = {}
+            self.judged = {}
+            self.img_rejects = {}
+            self.vid_judged = {}
+            self.vid_rejects = {}
+            self.abandoned = []
+            self.html_seen = {}
+            self.mode = None
             try:
                 sp = self.cfg.state_path()
                 if os.path.exists(sp):
@@ -280,7 +427,7 @@ class Pipeline:
 
     # -- helpers ------------------------------------------------------------
     def _count(self, stage):
-        d = self.cfg.stage_dir(STAGE_OUT[stage], ensure=False)
+        d = self.cfg.stage_dir(STAGE_OUT.get(stage, stage), ensure=False)
         if not os.path.isdir(d):
             return 0
         n = len(glob.glob(os.path.join(d, "*.png")))
@@ -309,11 +456,27 @@ class Pipeline:
     # -- the run loop -------------------------------------------------------
     def _run(self):
         self.set_status(running=True, last_error=None, note="scanning for work…")
-        self._log("pipeline run started")
+        self._log("pipeline run started" +
+                  (f" (mode {self.mode})" if self.mode else ""))
         try:
+            note = "all stages complete ✓"
             while not self.cancel_flag:
+                if self._target_reached():
+                    note = (f"target reached ✓ — {self.accepted_count()} "
+                            "accepted masters")
+                    break
+                if self._time_up():
+                    note = (f"time budget spent — {self.accepted_count()} "
+                            "accepted masters produced")
+                    break
                 work = self._one_pass()
                 if work == 0:
+                    if self.mode and self.mode.get("target") and \
+                            not self._target_reached():
+                        note = (f"prompt set exhausted at "
+                                f"{self.accepted_count()}/"
+                                f"{self.mode['target']} accepted masters — "
+                                "drop more HTML prompt files in")
                     break
             if self.cancel_flag:
                 self.set_status(running=False, stage="idle", label="paused",
@@ -324,9 +487,10 @@ class Pipeline:
                 self.desired_running = False  # finished cleanly; nothing to resume
                 with self.lock:
                     self._save_state()
+                self._log("run complete: " + note)
                 self.set_status(running=False, stage="done", label="done",
                                 percent=100, stage_done=0, stage_total=0,
-                                cancelled=False, note="all stages complete ✓")
+                                cancelled=False, note=note)
         except Exception as e:
             self._log("FATAL " + repr(e) + "\n" + traceback.format_exc())
             self.set_status(running=False, stage="idle", label="error",
@@ -335,8 +499,15 @@ class Pipeline:
         self._log("pipeline run finished")
 
     def _one_pass(self):
+        self._scan_html_dir()
+        self._active = self._pick_active()
+        self._judge_on = (self.cfg.judge_enabled and
+                          judgemod.available(self.cfg))
+        if self.cfg.judge_enabled and not self._judge_on:
+            self.set_status(note="AI judge unreachable — rendering unjudged")
         done = 0
         done += self._stage_flux()
+        done += self._stage_judge_flux()
         done += self._stage_img_up()
         done += self._stage_classify()
         done += self._stage_vid1()
@@ -345,7 +516,34 @@ class Pipeline:
         done += self._stage_vid2()
         done += self._stage_concat()
         done += self._stage_final_up()
+        done += self._stage_judge_final()
         return done
+
+    def _scan_html_dir(self):
+        """Auto-ingest *.html dropped into the prompts folder (new or edited
+        files only, tracked by mtime) — no UI upload needed."""
+        d = self.cfg.html_dir
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            return
+        for p in sorted(glob.glob(os.path.join(d, "*.htm*"))):
+            name = os.path.basename(p)
+            try:
+                mt = int(os.path.getmtime(p))
+            except OSError:
+                continue
+            if self.html_seen.get(name) == mt:
+                continue
+            try:
+                with open(p, "r", encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+            except OSError:
+                continue
+            self.ingest_html(name, text)
+            with self.lock:
+                self.html_seen[name] = mt
+                self._save_state()
 
     def _begin(self, stage, total):
         self.set_status(stage=stage, label=STAGE_LABELS[stage],
@@ -421,7 +619,9 @@ class Pipeline:
     def _stage_flux(self):
         with self.lock:
             items = [(k, v["text"]) for k, v in self.prompts.items()]
-        todo = [(k, t) for k, t in items if not self._exists("flux", k)]
+        todo = [(k, t) for k, t in items
+                if not self._exists("flux", k) and self._allowed(k)
+                and k not in self.abandoned]
         if not todo:
             return 0
         wf = self.cfg.workflows["flux"]
@@ -430,7 +630,7 @@ class Pipeline:
         self._begin("flux", len(todo))
         done = 0
         for k, text in todo:
-            if self.cancel_flag:
+            if self._should_stop():
                 break
             self._working("flux", done + 1, len(todo))
             g = json.loads(json.dumps(base))
@@ -445,17 +645,141 @@ class Pipeline:
             self._tick("flux", done, len(todo))
         return done
 
+    # ---- STAGE 1b: AI-judge the new FLUX stills ---------------------------
+    def _stage_judge_flux(self):
+        """Strict local-AI verdict on every not-yet-judged FLUX still. A
+        reject deletes the image (plus any downstream copies) so the next
+        pass regenerates it with a fresh seed; after max_image_retries the
+        last render is accepted so one stubborn prompt cannot stall the run."""
+        if not self._judge_on:
+            return 0
+        src_dir = self.cfg.stage_dir("flux", ensure=False)
+        todo = [k for k in self._keys_with_png(src_dir)
+                if k not in self.judged and self._allowed(k)]
+        if not todo:
+            return 0
+        self._begin("judge_flux", len(todo))
+        done = 0
+        for k in todo:
+            if self._should_stop():
+                break
+            self._working("judge_flux", done + 1, len(todo))
+            path = os.path.join(src_dir, k + ".png")
+            ok, reason = judgemod.judge_image(self.cfg, path)
+            with self.lock:
+                if ok:
+                    self.judged[k] = True
+                else:
+                    n = self.img_rejects.get(k, 0) + 1
+                    self.img_rejects[k] = n
+                    if n > self.cfg.judge_image_retries:
+                        self.judged[k] = True
+                        self._log(f"judge_flux {k}: accepted after {n - 1} "
+                                  f"rejects (giving up) — last: {reason}")
+                    else:
+                        self._delete_key_files(k, flux_too=True)
+                        self._log(f"judge_flux REJECT {k} "
+                                  f"({n}/{self.cfg.judge_image_retries}): "
+                                  f"{reason} — regenerating")
+                self._save_state()
+            done += 1
+            self._tick("judge_flux", done, len(todo))
+        return done
+
+    def _delete_key_files(self, key, flux_too=False):
+        """Remove a key's rendered artefacts so the filesystem-resume logic
+        regenerates them. flux_too also drops the source still."""
+        stem = f"{self.letters.get(key, '')}_{key}"
+        for stage, name, exts in (
+                ("final_up", stem, (".mp4", ".webm")),
+                ("concat", stem, (".mp4", ".webm")),
+                ("vid2", stem, (".mp4", ".webm")),
+                ("vid1", stem, (".mp4", ".webm")),
+                ("classified", stem, (".png",)),
+                ("img_up", key, (".png",)),
+                ("flux", key, (".png",)) if flux_too else (None, None, ())):
+            if not stage:
+                continue
+            d = self.cfg.stage_dir(stage, ensure=False)
+            for ext in exts:
+                p = os.path.join(d, name + ext)
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except OSError as e:
+                    self._log(f"judge cleanup: could not remove {p}: {e}")
+        # bookkeeping tied to the dead chain (caller holds the lock)
+        self.judged.pop(key, None)
+        self.vid_judged.pop(stem, None)
+        self.posemap.pop(stem, None)
+        if flux_too:
+            self.letters.pop(key, None)
+
+    # ---- STAGE 9b: AI-judge the finished masters --------------------------
+    def _stage_judge_final(self):
+        """3 frames at a random point of each new master -> coherence verdict.
+        A reject moves the master to 10_review (kept for human eyes) and
+        deletes the whole chain incl. the FLUX still, so a completely fresh
+        chain regenerates; after max_video_retries the key is abandoned."""
+        if not (self._judge_on and self.cfg.judge_video_enabled):
+            return 0
+        d = self.cfg.stage_dir("final_up", ensure=False)
+        todo = [s for s in self._stems_with_clip(d)
+                if s not in self.vid_judged
+                and self._allowed(s.split("_", 1)[1])]
+        if not todo:
+            return 0
+        review = self.cfg.stage_dir("review")
+        self._begin("judge_final", len(todo))
+        done = 0
+        for s in todo:
+            if self._should_stop():
+                break
+            self._working("judge_final", done + 1, len(todo))
+            path = self._clip_path("final_up", s)
+            ok, reason = judgemod.judge_video(self.cfg, path)
+            with self.lock:
+                if ok:
+                    self.vid_judged[s] = True
+                    self._log(f"judge_final ACCEPT {s}: {reason or 'clean'}")
+                else:
+                    key = s.split("_", 1)[1]
+                    n = self.vid_rejects.get(key, 0) + 1
+                    self.vid_rejects[key] = n
+                    dst = os.path.join(
+                        review, f"{s}_rej{n}" + os.path.splitext(path)[1])
+                    try:
+                        shutil.move(path, dst)
+                    except OSError as e:
+                        self._log(f"judge_final: review move failed {s}: {e}")
+                    self._delete_key_files(key, flux_too=True)
+                    if n > self.cfg.judge_video_retries:
+                        if key not in self.abandoned:
+                            self.abandoned.append(key)
+                        self._log(f"judge_final REJECT {s}: {reason} — "
+                                  f"{n} strikes, key abandoned (in 10_review)")
+                    else:
+                        self._log(f"judge_final REJECT {s} "
+                                  f"({n}/{self.cfg.judge_video_retries}): "
+                                  f"{reason} — moved to review, chain remade")
+                self._save_state()
+            done += 1
+            self._tick("judge_final", done, len(todo))
+        return done
+
     # ---- STAGE 2: image upscale x2 ---------------------------------------
     def _stage_img_up(self):
         src_dir = self.cfg.stage_dir("flux", ensure=False)
-        todo = [k for k in self._keys_with_png(src_dir) if not self._exists("img_up", k)]
+        todo = [k for k in self._keys_with_png(src_dir)
+                if not self._exists("img_up", k) and self._allowed(k)
+                and (not self._judge_on or k in self.judged)]
         if not todo:
             return 0
         out = self.cfg.stage_dir("img_up")
         self._begin("img_up", len(todo))
         done = 0
         for k in todo:
-            if self.cancel_flag:
+            if self._should_stop():
                 break
             self._working("img_up", done + 1, len(todo))
             src = os.path.join(src_dir, k + ".png")
@@ -470,8 +794,9 @@ class Pipeline:
     # ---- STAGE 3: classify -> letter-prefixed copies ---------------------
     def _stage_classify(self):
         src_dir = self.cfg.stage_dir("img_up", ensure=False)
-        keys = [k for k in self._keys_with_png(src_dir) if k not in self.letters
-                or not self._classified_exists(k)]
+        keys = [k for k in self._keys_with_png(src_dir)
+                if (k not in self.letters or not self._classified_exists(k))
+                and self._allowed(k)]
         if not keys:
             return 0
         from . import classify
@@ -512,7 +837,8 @@ class Pipeline:
     def _stage_vid1(self):
         src_dir = self.cfg.stage_dir("classified", ensure=False)
         stems = [s for s in self._stems_with_png(src_dir)
-                 if not self._exists("vid1", s, video=True)]
+                 if not self._exists("vid1", s, video=True)
+                 and self._allowed(s.split("_", 1)[1])]
         if not stems:
             return 0
         wf = self.cfg.workflows["wan"]
@@ -521,7 +847,7 @@ class Pipeline:
         self._begin("vid1", len(stems))
         done = 0
         for s in stems:
-            if self.cancel_flag:
+            if self._should_stop():
                 break
             self._working("vid1", done + 1, len(stems))
             letter = s.split("_", 1)[0]
@@ -553,7 +879,7 @@ class Pipeline:
         self._begin("lastframe", len(stems))
         done = 0
         for s in stems:
-            if self.cancel_flag:
+            if self._should_stop():
                 break
             self._working("lastframe", done + 1, len(stems))
             clip = self._clip_path("vid1", s)
@@ -581,7 +907,7 @@ class Pipeline:
         self._begin("lf_up", len(stems))
         done = 0
         for s in stems:
-            if self.cancel_flag:
+            if self._should_stop():
                 break
             self._working("lf_up", done + 1, len(stems))
             src = os.path.join(src_dir, s + ".png")
@@ -605,7 +931,8 @@ class Pipeline:
         seed_stage = "lastframe" if self.cfg.cont_seed == "native" else "lf_up"
         src_dir = self.cfg.stage_dir(seed_stage, ensure=False)
         stems = [s for s in self._stems_with_png(src_dir)
-                 if s in self.posemap and not self._exists("vid2", s, video=True)]
+                 if s in self.posemap and not self._exists("vid2", s, video=True)
+                 and self._allowed(s.split("_", 1)[1])]
         if not stems:
             return 0
         wf = self.cfg.workflows["wan"]
@@ -613,7 +940,7 @@ class Pipeline:
         self._begin("vid2", len(stems))
         done = 0
         for s in stems:
-            if self.cancel_flag:
+            if self._should_stop():
                 break
             self._working("vid2", done + 1, len(stems))
             pm = self.posemap[s]
@@ -630,7 +957,8 @@ class Pipeline:
         surge/colour/speed/blur seam by construction. Output = raw 97f clip."""
         d1 = self.cfg.stage_dir("vid1", ensure=False)
         stems = [s for s in self._stems_with_clip(d1)
-                 if s in self.posemap and not self._exists("vid2", s, video=True)]
+                 if s in self.posemap and not self._exists("vid2", s, video=True)
+                 and self._allowed(s.split("_", 1)[1])]
         if not stems:
             return 0
         wf = self.cfg.workflows["wan"]
@@ -638,7 +966,7 @@ class Pipeline:
         self._begin("vid2", len(stems))
         done = 0
         for s in stems:
-            if self.cancel_flag:
+            if self._should_stop():
                 break
             self._working("vid2", done + 1, len(stems))
             clip1 = self._clip_path("vid1", s)
@@ -710,14 +1038,15 @@ class Pipeline:
         native = self.cfg.native_long
         stems = [s for s in self._stems_with_clip(d1)
                  if (native or self._clip_path("vid2", s))
-                 and not self._exists("concat", s, video=True)]
+                 and not self._exists("concat", s, video=True)
+                 and self._allowed(s.split("_", 1)[1])]
         if not stems:
             return 0
         out = self.cfg.stage_dir("concat")
         self._begin("concat", len(stems))
         done = 0
         for s in stems:
-            if self.cancel_flag:
+            if self._should_stop():
                 break
             self._working("concat", done + 1, len(stems))
             a = self._clip_path("vid1", s)
@@ -753,14 +1082,15 @@ class Pipeline:
         # and a moved master is finished work, not missing work.
         stems = [s for s in self._stems_with_clip(d)
                  if not self._exists("final_up", s, video=True)
-                 and not lib.master_exists(self.cfg, s)]
+                 and not lib.master_exists(self.cfg, s)
+                 and self._allowed(s.split("_", 1)[1])]
         if not stems:
             return 0
         out = self.cfg.stage_dir("final_up")
         self._begin("final_up", len(stems))
         done = 0
         for s in stems:
-            if self.cancel_flag:
+            if self._should_stop():
                 break
             self._working("final_up", done + 1, len(stems))
             src = self._clip_path("concat", s)

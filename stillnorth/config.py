@@ -24,6 +24,7 @@ STAGE_DIRS = {
     "vid2":      "07_vid2",            # continuation Wan 2.2 clips
     "concat":    "08_concat",          # clip1 + clip2 joined (~10-11s)
     "final_up":  "09_final_up4",       # final clips upscaled x4
+    "review":    "10_review",          # AI-judge rejected masters (kept, not deleted)
 }
 
 
@@ -178,6 +179,38 @@ class Config:
         # also pull HSV saturation back to the source clip's level after super-res.
         self.esrgan_saturation_match = bool(
             self.raw.get("esrgan_saturation_match", True))
+
+        # AI judge (local Ollama VLM): strict pass/fail on FLUX stills before
+        # they enter the chain, and on finished masters (3 frames sampled at a
+        # random point -> inter-frame coherence). Any hesitation = reject.
+        j = self.raw.get("judge", {})
+        self.judge_enabled = bool(j.get("enabled", True))
+        self.judge_video_enabled = bool(j.get("video_check", True))
+        self.judge_model = j.get("model", "huihui_ai/Qwen3.6-abliterated:35b")
+        self.ollama_url = str(j.get("ollama_url", "http://127.0.0.1:11434")).rstrip("/")
+        self.judge_timeout = int(j.get("timeout", 300))
+        # rejected FLUX image -> deleted -> regenerated with a fresh seed, at
+        # most this many times; after that the last render is accepted (logged)
+        # so one stubborn prompt can never stall the whole batch.
+        self.judge_image_retries = int(j.get("max_image_retries", 3))
+        # rejected master -> moved to 10_review + whole chain deleted so a
+        # fresh chain regenerates; after this many remakes the key is abandoned.
+        self.judge_video_retries = int(j.get("max_video_retries", 2))
+        # keep_alive=1m: consecutive judge calls in one batch stage reuse the
+        # loaded model (0 would reload ~20GB per image), and it self-evicts a
+        # minute after the stage ends so FLUX/Wan get the VRAM back.
+        self.judge_keep_alive = j.get("keep_alive", "1m")
+        # CV temporal-coherence gate on masters: reject only when BOTH trip
+        # (calibrated: goods <=3.01/<=0.10, known-bads >=3.79/>=0.207).
+        self.judge_shimmer_max = float(j.get("shimmer_max", 3.5))
+        self.judge_instab_max = float(j.get("instab_max", 0.15))
+
+        # folder scanned for HTML prompt files on every pass -- drop files
+        # there instead of uploading through the UI. Default lives inside the
+        # workspace so it is visible next to the rendered stages.
+        d = self.raw.get("html_prompts_dir", "")
+        self.html_dir = os.path.normpath(d) if d else os.path.join(
+            self.workspace, "00_html_prompts")
 
         self.poses = self.motion["poses"]
         self.speed_by_pose = self.motion["speed_by_pose"]

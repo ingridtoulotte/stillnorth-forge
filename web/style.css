@@ -246,3 +246,14 @@ button,.nav-item,.link{cursor:pointer}
   *,*::before,*::after{animation-duration:.001ms!important; animation-iteration-count:1!important; transition-duration:.001ms!important}
   .aurora{animation:none}
 }
+
+/* ---- run-mode inputs (target count / time budget) ---- */
+.mode-row { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  margin:10px 0 2px; }
+.mode-field { display:flex; align-items:center; gap:8px; font-size:.82rem;
+  color:var(--muted); }
+.mode-field input { width:86px; padding:6px 8px; border-radius:8px;
+  border:1px solid var(--line); background:var(--panel2); color:var(--text);
+  font:inherit; font-size:.85rem; }
+.mode-field input:focus { outline:none; border-color:var(--accent); }
+.mode-status { font-size:.8rem; color:var(--accent); margin-left:auto; }
