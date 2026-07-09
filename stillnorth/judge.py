@@ -138,10 +138,54 @@ def available(cfg):
         return False
 
 
+def image_risk_metrics(path, scale_w=768):
+    """Deterministic animate-risk metrics for one FLUX still (no VLM).
+
+    fog_cover — fraction of the frame that is bright, desaturated and
+    texture-free (a dense fog/cloud bank). Wan cannot hold a big soft fog
+    mass in place over a long clip: it animates it, smearing everything the
+    fog passes over. Measured on real production sources: the clip whose
+    master came back with fog-smear covered ~half the frame; clean sources
+    measure near zero.
+    sharp — global Laplacian variance; catches an outright blurry FLUX
+    render before 14 minutes of GPU time get spent animating it."""
+    import cv2
+    import numpy as np
+    img = cv2.imread(path)
+    if img is None:
+        return {"fog_cover": 0.0, "sharp": 1e9}
+    h, w = img.shape[:2]
+    if w > scale_w:
+        img = cv2.resize(img, (scale_w, int(h * scale_w / w)),
+                         interpolation=cv2.INTER_AREA)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    lap = cv2.Laplacian(g, cv2.CV_64F)
+    tex = cv2.blur(np.abs(lap), (15, 15))
+    fog = (g > 165) & (hsv[..., 1] < 45) & (tex < 2.0)
+    return {"fog_cover": float(fog.mean()), "sharp": float(lap.var())}
+
+
 def judge_image(cfg, path):
-    """(ok, reason) for one FLUX still. Errors talking to Ollama do NOT
-    reject work (the batch must survive a stopped Ollama): they pass with a
-    logged reason instead."""
+    """(ok, reason) for one FLUX still. Gate 1 is a deterministic CV
+    animate-risk check (fog coverage + outright blur) — this is where bad
+    videos are prevented, at the cheap image stage, instead of detected
+    after 14 minutes of render. Gate 2 is the VLM plausibility check.
+    Errors talking to Ollama do NOT reject work (the batch must survive a
+    stopped Ollama): they pass with a logged reason instead."""
+    try:
+        rm = image_risk_metrics(path)
+        if rm["fog_cover"] > cfg.judge_fog_cover_max:
+            return False, (f"animate-risk: fog/cloud bank covers "
+                           f"{rm['fog_cover'] * 100:.0f}% of frame "
+                           f"(max {cfg.judge_fog_cover_max * 100:.0f}%) — "
+                           "Wan smears large soft fog masses")
+        if rm["sharp"] < cfg.judge_image_min_sharp:
+            return False, (f"animate-risk: image too soft "
+                           f"(sharpness {rm['sharp']:.0f} < "
+                           f"{cfg.judge_image_min_sharp:.0f})")
+    except Exception:
+        pass                                     # CV gate is best-effort
     try:
         ok, reason = _parse_verdict(_chat(cfg, IMAGE_PROMPT, [_b64_image(path)]))
         return ok, reason
@@ -231,6 +275,10 @@ def judge_video(cfg, path, rng=None, spacing=0.5):
        Thresholds calibrated on user-verdicted masters: goods measured
        <=3.01/<=0.10, jumping-shadows bad 4.17/0.21, SR-wire bad 3.79/0.22.
     2. VLM semantic check — 3 frames at a random point, content coherence.
+       SKIPPED when judge.video_check is "cv": quality steering belongs at
+       the image stage (judge_image risk gates), where a reject costs
+       seconds, not a re-render of the whole 14-minute chain. The cheap CV
+       gate stays as the deterministic safety net on masters.
     Ollama being down skips only gate 2 (CV gate always runs)."""
     try:
         fm = flicker_metrics(path)
@@ -241,6 +289,8 @@ def judge_video(cfg, path, rng=None, spacing=0.5):
                            "(objects/texture jump between frames)")
     except Exception:
         pass                                     # CV gate is best-effort
+    if getattr(cfg, "judge_video_mode", "full") == "cv":
+        return True, "CV gate clean (VLM video check off — image-stage gating)"
     frames = sample_frames(cfg, path, spacing=spacing, rng=rng)
     if len(frames) < 3:
         return True, "frame sampling failed — passed unjudged"

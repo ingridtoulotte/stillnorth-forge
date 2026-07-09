@@ -599,9 +599,31 @@ def gold_join(cfg, clip1, raw, dst):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _smooth_curve(v, alpha=0.9):
+    """Phase-neutral smooth of a per-frame measurement curve: forward +
+    backward EMA averaged, so the smoothed value tracks the real drift shape
+    without lagging it (a lag would over/under-correct at drift turns)."""
+    fwd = []
+    g = float(v[0])
+    for x in v:
+        g = alpha * g + (1 - alpha) * float(x)
+        fwd.append(g)
+    bwd = []
+    g = float(v[-1])
+    for x in reversed(v):
+        g = alpha * g + (1 - alpha) * float(x)
+        bwd.append(g)
+    bwd.reverse()
+    return [(a + b) / 2 for a, b in zip(fwd, bwd)]
+
+
 def _progressive_contrast(files, cfg):
-    """Flatten Wan's contrast/saturation drift against its linear trend, in place.
-    Gentle early, stronger late; keeps each frame's natural deviation."""
+    """Flatten Wan's contrast/saturation drift, in place. Corrects against the
+    SMOOTHED MEASURED curve, not a linear fit: Wan's drift is not linear
+    (e.g. saturation rises through clip1 then eases through the continuation)
+    and a straight-line fit left most of a +12% saturation swing in real
+    production masters. Per-frame natural deviation from the smooth curve is
+    kept; only the slow drift component is removed."""
     np, cv2 = _np_cv2()
     n = len(files)
 
@@ -617,23 +639,97 @@ def _progressive_contrast(files, cfg):
         S[i] = luma(f).std()
         SAT[i] = cv2.cvtColor(np.clip(f, 0, 255).astype("uint8"),
                               cv2.COLOR_BGR2HSV)[..., 1].mean()
-    idx = np.arange(n)
-    bs, as_ = np.polyfit(idx, S, 1)
-    Ts = as_ + bs * idx
-    bt, at_ = np.polyfit(idx, SAT, 1)
-    Tsat = at_ + bt * idx
+    Ts = _smooth_curve(S)
+    Tsat = _smooth_curve(SAT)
     hi = min(50, n)
-    tgtS = float(np.mean(S[10:hi])) * cfg.contrast_boost
-    tgtSAT = float(np.mean(SAT[10:hi])) * cfg.saturation_boost
+    tgtS = float(np.mean(Ts[10:hi])) * cfg.contrast_boost
+    tgtSAT = float(np.mean(Tsat[10:hi])) * cfg.saturation_boost
     for i, f in enumerate(imgs):
-        cs = float(np.clip(tgtS / max(Ts[i], 1e-3), 0.7, 1.2))
+        cs = float(np.clip(tgtS / max(Ts[i], 1e-3), 0.7, 1.3))
         for c in range(3):
             m = f[..., c].mean()
             f[..., c] = (f[..., c] - m) * cs + m
-        ss = float(np.clip(tgtSAT / max(Tsat[i], 1e-3), 0.7, 1.2))
+        ss = float(np.clip(tgtSAT / max(Tsat[i], 1e-3), 0.7, 1.3))
         L = luma(f)[..., None]
         f = L + (f - L) * ss
         cv2.imwrite(files[i], np.clip(f, 0, 255).astype("uint8"))
+
+
+def _detail_hold(files, cfg, sigma=1.2):
+    """Hold fine-detail level constant across the clip, in place. Wan
+    progressively melts high-frequency texture over a long clip, and the
+    continuation half comes out of gold_join with less high-frequency
+    energy (retime/blend), which Real-ESRGAN amplifies into a visible
+    sharpness step at the seam even when the 720p input measures flat.
+    Measures per-frame sharpness, smooths the curve, and applies an
+    adaptive unsharp whose strength grows exactly as much as the measured
+    decay -- frames at the clip's own early-window baseline are untouched,
+    softer frames get progressively restored. Run on the SUPER-RES output
+    frames (what the viewer actually sees), with a sigma scaled to the
+    frame size by the caller."""
+    np, cv2 = _np_cv2()
+
+    def sharp(p):
+        g = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
+        h, w = g.shape
+        if w > 960:
+            g = cv2.resize(g, (960, int(h * 960 / w)))
+        return cv2.Laplacian(g, cv2.CV_64F).var()
+
+    S = _smooth_curve([sharp(p) for p in files])
+    # anchor to the clip's own best level (p80), not the first frames --
+    # clips routinely START soft (Wan warms up out of the still) and sag
+    # again after the seam; both ends get lifted toward the clip's peak.
+    base = float(np.percentile(S, 80))
+    cap = float(getattr(cfg, "detail_hold_max", 1.5))
+    for i, p in enumerate(files):
+        gain = min(cap, max(1.0, (base / max(S[i], 1.0)) ** 0.7))
+        a = gain - 1.0
+        if a < 0.02:
+            continue
+        f = cv2.imread(p).astype(np.float32)
+        blur = cv2.GaussianBlur(f, (0, 0), sigma)
+        cv2.imwrite(p, np.clip(f + a * (f - blur), 0, 255).astype("uint8"))
+
+
+def restore_tail(cfg, clip1, dst, n_frames):
+    """Write clip1's last n frames as a detail-restored seed clip for the
+    continuation render. Matched-seed A/B (2026-07-09, D-class birch content):
+    Wan holds whatever detail level its seed frames carry — a raw tail
+    (already melted ~-15%) seeds a continuation that runs soft end to end,
+    while the same seed with a gentle unsharp restores ~+60% measured
+    Laplacian variance across the WHOLE continuation, no halos, same render
+    time. Encoded near-lossless (x264 crf 10) so the seed itself adds no
+    compression softness."""
+    np, cv2 = _np_cv2()
+    cap = cv2.VideoCapture(clip1)
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, total - n_frames))
+    frames = []
+    while True:
+        ok, fr = cap.read()
+        if not ok:
+            break
+        frames.append(fr)
+    cap.release()
+    frames = frames[-n_frames:]
+    if not frames:
+        return False
+    h, w = frames[0].shape[:2]
+    amount = float(getattr(cfg, "seed_restore_amount", 0.55))
+    p = subprocess.Popen(
+        [cfg.ffmpeg, "-y", "-loglevel", "error", "-f", "rawvideo",
+         "-pix_fmt", "bgr24", "-s", f"{w}x{h}", "-r", str(cfg.fps), "-i", "-",
+         "-c:v", "libx264", "-crf", "10", "-pix_fmt", "yuv420p", dst],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL)
+    for fr in frames:
+        f32 = fr.astype(np.float32)
+        blur = cv2.GaussianBlur(f32, (0, 0), 1.5)
+        out = np.clip(f32 + amount * (f32 - blur), 0, 255).astype("uint8")
+        p.stdin.write(out.tobytes())
+    p.stdin.close()
+    return p.wait() == 0 and os.path.exists(dst)
 
 
 def esrgan_available(cfg):
@@ -774,9 +870,29 @@ def esrgan_finish(cfg, src, dst):
         if getattr(cfg, "final_grade", ""):
             chain.append(cfg.final_grade)
         vf = ",".join(chain)
-        return _run([cfg.ffmpeg, "-y", "-loglevel", "error", "-framerate",
+        if not getattr(cfg, "detail_hold", True):
+            return _run([cfg.ffmpeg, "-y", "-loglevel", "error", "-framerate",
+                         str(out_fps), "-i", os.path.join(outF, "f%05d.png"),
+                         "-vf", vf] + _codec(cfg, cfg.final_cq) + [dst]) \
+                and os.path.exists(dst)
+        # detail_hold: render the full chain to final-resolution frames
+        # first, equalise the sharpness the viewer ACTUALLY sees (measuring
+        # any earlier -- on the pre-SR or pre-downscale frames -- misses the
+        # seam sharpness step that only materialises after unsharp+scale),
+        # then encode.
+        finF = os.path.join(tmp, "fin")
+        os.makedirs(finF)
+        if not _run([cfg.ffmpeg, "-y", "-loglevel", "error", "-framerate",
                      str(out_fps), "-i", os.path.join(outF, "f%05d.png"),
-                     "-vf", vf] + _codec(cfg, cfg.final_cq) + [dst]) \
+                     "-vf", vf, os.path.join(finF, "f%05d.png")]):
+            return False
+        fin_files = sorted(glob.glob(os.path.join(finF, "*.png")))
+        if not fin_files:
+            return False
+        _detail_hold(fin_files, cfg, sigma=2.0)
+        return _run([cfg.ffmpeg, "-y", "-loglevel", "error", "-framerate",
+                     str(out_fps), "-i", os.path.join(finF, "f%05d.png")]
+                    + _codec(cfg, cfg.final_cq) + [dst]) \
             and os.path.exists(dst)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

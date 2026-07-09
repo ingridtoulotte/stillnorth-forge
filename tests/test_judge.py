@@ -117,6 +117,142 @@ class TestJudgeVideo(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class RiskCfg(FakeCfg):
+    judge_fog_cover_max = 0.28
+    judge_image_min_sharp = 60.0
+
+
+class TestImageRiskGate(unittest.TestCase):
+    def test_fog_bank_rejects_before_vlm(self):
+        """A big fog mass must reject at the image stage — deterministically,
+        without spending a VLM call (chat must not be reached)."""
+        with mock.patch.object(judge, "image_risk_metrics",
+                               return_value={"fog_cover": 0.31, "sharp": 400}), \
+             mock.patch.object(judge, "_chat") as chat:
+            ok, reason = judge.judge_image(RiskCfg(), "img.png")
+        self.assertFalse(ok)
+        self.assertIn("fog", reason)
+        chat.assert_not_called()
+
+    def test_blurry_still_rejects(self):
+        with mock.patch.object(judge, "image_risk_metrics",
+                               return_value={"fog_cover": 0.0, "sharp": 12}), \
+             mock.patch.object(judge, "_chat") as chat:
+            ok, reason = judge.judge_image(RiskCfg(), "img.png")
+        self.assertFalse(ok)
+        self.assertIn("soft", reason)
+        chat.assert_not_called()
+
+    def test_clean_image_falls_through_to_vlm(self):
+        with mock.patch.object(judge, "image_risk_metrics",
+                               return_value={"fog_cover": 0.18, "sharp": 640}), \
+             mock.patch.object(judge, "_b64_image", return_value="x"), \
+             mock.patch.object(judge, "_chat", return_value="NONE"):
+            ok, _ = judge.judge_image(RiskCfg(), "img.png")
+        self.assertTrue(ok)
+
+    def test_risk_metrics_failure_never_blocks(self):
+        """CV risk gate is best-effort: an exception inside it must fall
+        through to the VLM, not reject."""
+        with mock.patch.object(judge, "image_risk_metrics",
+                               side_effect=RuntimeError("cv2 boom")), \
+             mock.patch.object(judge, "_b64_image", return_value="x"), \
+             mock.patch.object(judge, "_chat", return_value="NONE"):
+            ok, _ = judge.judge_image(RiskCfg(), "img.png")
+        self.assertTrue(ok)
+
+
+class CvOnlyCfg(FakeCfg):
+    judge_video_mode = "cv"
+
+
+class TestVideoCvOnlyMode(unittest.TestCase):
+    def test_cv_mode_skips_vlm(self):
+        """video_check='cv': CV gate runs, VLM is never called on masters —
+        quality steering lives at the image stage."""
+        with mock.patch.object(judge, "flicker_metrics",
+                               return_value={"shimmer": 0.5,
+                                             "tex_instab": 0.02,
+                                             "frames": 200}), \
+             mock.patch.object(judge, "_chat") as chat, \
+             mock.patch.object(judge, "sample_frames") as sf:
+            ok, reason = judge.judge_video(CvOnlyCfg(), "vid.mp4")
+        self.assertTrue(ok)
+        chat.assert_not_called()
+        sf.assert_not_called()
+
+    def test_cv_mode_still_rejects_flicker(self):
+        with mock.patch.object(judge, "flicker_metrics",
+                               return_value={"shimmer": 4.2,
+                                             "tex_instab": 0.21,
+                                             "frames": 200}):
+            ok, reason = judge.judge_video(CvOnlyCfg(), "vid.mp4")
+        self.assertFalse(ok)
+        self.assertIn("flicker", reason)
+
+
+class TestSmoothCurveAndDetailHold(unittest.TestCase):
+    def test_smooth_curve_tracks_nonlinear_drift(self):
+        """The de-drift target curve must follow a rise-then-fall shape (a
+        linear fit does not — that bug left +10% saturation drift in real
+        masters)."""
+        from stillnorth.finish import _smooth_curve
+        curve = [80.0] * 30 + [80 + i for i in range(15)] + [95.0] * 30
+        sm = _smooth_curve(curve)
+        self.assertLess(abs(sm[0] - 80), 2.0)
+        self.assertLess(abs(sm[-1] - 95), 2.0)
+
+    def test_detail_hold_config_defaults(self):
+        from stillnorth.config import Config
+        c = Config.__new__(Config)
+        c.raw = {"comfy_server": "x", "ffmpeg": "ffmpeg",
+                 "comfy_input_dir": ".", "comfy_output_dir": ".",
+                 "workspace_subdir": "W", "server_host": "127.0.0.1",
+                 "server_port": 1, "render_timeout_img": 1,
+                 "render_timeout_vid": 1, "poll_seconds": 1,
+                 "image_upscale_mult": 2, "lastframe_upscale_mult": 4,
+                 "final_upscale_mult": 4, "fps": 16, "video_cq": 19,
+                 "nvenc": True, "upscale_denoise": "", "upscale_sharp": "",
+                 "upscale_grain": ""}
+        with mock.patch("stillnorth.config._load",
+                        side_effect=[c.raw, {}, {"poses": [], "speed_by_pose": {},
+                                                 "classes": {}}]):
+            c.reload()
+        self.assertTrue(c.detail_hold)
+        self.assertEqual(c.detail_hold_max, 1.5)
+        self.assertTrue(c.seed_restore)
+        self.assertEqual(c.seed_restore_amount, 0.55)
+        # judge risk-gate defaults
+        self.assertEqual(c.judge_fog_cover_max, 0.28)
+        self.assertEqual(c.judge_image_min_sharp, 60.0)
+        # video judge defaults to CV-only mode (VLM steering at image stage)
+        self.assertEqual(c.judge_video_mode, "cv")
+        self.assertTrue(c.judge_video_enabled)
+
+    def test_video_check_parses_bool_and_string(self):
+        from stillnorth.config import Config
+        base = {"comfy_server": "x", "ffmpeg": "ffmpeg",
+                "comfy_input_dir": ".", "comfy_output_dir": ".",
+                "workspace_subdir": "W", "server_host": "127.0.0.1",
+                "server_port": 1, "render_timeout_img": 1,
+                "render_timeout_vid": 1, "poll_seconds": 1,
+                "image_upscale_mult": 2, "lastframe_upscale_mult": 4,
+                "final_upscale_mult": 4, "fps": 16, "video_cq": 19,
+                "nvenc": True, "upscale_denoise": "", "upscale_sharp": "",
+                "upscale_grain": ""}
+        for vc, mode, enabled in ((True, "full", True), (False, "off", False),
+                                  ("cv", "cv", True), ("full", "full", True)):
+            c = Config.__new__(Config)
+            c.raw = dict(base, judge={"video_check": vc})
+            with mock.patch("stillnorth.config._load",
+                            side_effect=[c.raw, {},
+                                         {"poses": [], "speed_by_pose": {},
+                                          "classes": {}}]):
+                c.reload()
+            self.assertEqual(c.judge_video_mode, mode, vc)
+            self.assertEqual(c.judge_video_enabled, enabled, vc)
+
+
 class TestConfigKeys(unittest.TestCase):
     def test_defaults_present(self):
         from stillnorth.config import Config

@@ -174,6 +174,19 @@ class Config:
         self.final_grade = self.raw.get(
             "final_grade", "eq=contrast=0.93:gamma=1.04:saturation=0.97")
         self.contrast_flatten = bool(self.raw.get("contrast_flatten", True))
+        # detail_hold: before super-res, adaptively unsharp late frames so the
+        # clip's fine-detail level (Laplacian variance) stays at its own
+        # early-window baseline instead of melting over the duration (Wan
+        # progressively loses high-frequency texture; ESRGAN amplifies the
+        # loss). detail_hold_max caps the restoration gain.
+        self.detail_hold = bool(self.raw.get("detail_hold", True))
+        self.detail_hold_max = float(self.raw.get("detail_hold_max", 1.5))
+        # seed_restore: detail-restore clip1's tail frames before they seed
+        # the continuation. Wan carries its seed's detail level through the
+        # whole continuation — raw (melted) tail = soft second half; restored
+        # tail measured +60% sharper continuation on matched-seed A/B.
+        self.seed_restore = bool(self.raw.get("seed_restore", True))
+        self.seed_restore_amount = float(self.raw.get("seed_restore_amount", 0.55))
         self.contrast_boost = float(self.raw.get("contrast_target_boost", 1.0))
         self.saturation_boost = float(self.raw.get("saturation_target_boost", 1.0))
         # esrgan_color_match: after super-res, pull the upscaled colour
@@ -190,7 +203,15 @@ class Config:
         # random point -> inter-frame coherence). Any hesitation = reject.
         j = self.raw.get("judge", {})
         self.judge_enabled = bool(j.get("enabled", True))
-        self.judge_video_enabled = bool(j.get("video_check", True))
+        # video_check: "full" (CV gate + VLM), "cv" (CV gate only — the VLM
+        # quality steering happens at the image stage instead, where a reject
+        # costs seconds instead of a 14-minute chain remake), or false/"off".
+        # Booleans keep working: true -> "full", false -> "off".
+        vc = j.get("video_check", "cv")
+        if isinstance(vc, bool):
+            vc = "full" if vc else "off"
+        self.judge_video_mode = str(vc).lower()
+        self.judge_video_enabled = self.judge_video_mode != "off"
         self.judge_model = j.get("model", "huihui_ai/Qwen3.6-abliterated:35b")
         self.ollama_url = str(j.get("ollama_url", "http://127.0.0.1:11434")).rstrip("/")
         self.judge_timeout = int(j.get("timeout", 300))
@@ -209,6 +230,17 @@ class Config:
         # (calibrated: goods <=3.01/<=0.10, known-bads >=3.79/>=0.207).
         self.judge_shimmer_max = float(j.get("shimmer_max", 3.5))
         self.judge_instab_max = float(j.get("instab_max", 0.15))
+        # Deterministic animate-risk gates on FLUX stills (judge_image gate 1):
+        # fog_cover_max — reject when a bright desaturated texture-free
+        # fog/cloud mass covers more than this fraction of the frame (Wan
+        # animates big soft fog banks and smears whatever they pass over).
+        # image_min_sharp — reject outright blurry FLUX renders (Laplacian
+        # variance floor) before spending 14 GPU-minutes animating them.
+        # (calibrated 2026-07-09 on real production sources: the C master
+        # that came back fog-smeared measured 0.304, the clean D 0.181 —
+        # re-tune when more verdicted samples exist)
+        self.judge_fog_cover_max = float(j.get("fog_cover_max", 0.28))
+        self.judge_image_min_sharp = float(j.get("image_min_sharp", 60.0))
 
         # folder scanned for HTML prompt files on every pass -- drop files
         # there instead of uploading through the UI. Default lives inside the
