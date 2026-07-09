@@ -139,6 +139,15 @@ class TestConfigKeys(unittest.TestCase):
         self.assertEqual(c.judge_image_retries, 3)
         self.assertEqual(c.judge_video_retries, 2)
         self.assertTrue(c.html_dir.endswith("00_html_prompts"))
+        self.assertIn("contrast", c.final_grade)   # gentle grade on by default
+
+    def test_judge_prompts_target_known_defects(self):
+        """Prompt regressions: steam-column reject (stills) and blur/blob
+        reject (video) must stay in the calibrated judge prompts."""
+        self.assertIn("COLUMNS of steam", judge.IMAGE_PROMPT)
+        self.assertIn("fog banks and valley mist are fine", judge.IMAGE_PROMPT)
+        self.assertIn("blobs materialising", judge.VIDEO_PROMPT)
+        self.assertIn("blurry", judge.VIDEO_PROMPT)
 
     def test_review_stage_dir(self):
         from stillnorth.config import STAGE_DIRS

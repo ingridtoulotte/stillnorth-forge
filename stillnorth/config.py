@@ -168,6 +168,11 @@ class Config:
         # final_fps: motion-interpolate masters to this rate before super-res
         # (0 = keep the native Wan rate). 32 kills the 16fps judder on TVs.
         self.final_fps = int(self.raw.get("final_fps", 0))
+        # final_grade: gentle global tone soften applied LAST in the master
+        # encode ("" = off). Default eases the FLUX-inherited punchy grade
+        # (crushed bog shadows vs white sky) without visibly flattening.
+        self.final_grade = self.raw.get(
+            "final_grade", "eq=contrast=0.93:gamma=1.04:saturation=0.97")
         self.contrast_flatten = bool(self.raw.get("contrast_flatten", True))
         self.contrast_boost = float(self.raw.get("contrast_target_boost", 1.0))
         self.saturation_boost = float(self.raw.get("saturation_target_boost", 1.0))

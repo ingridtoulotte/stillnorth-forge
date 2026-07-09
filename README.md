@@ -32,12 +32,14 @@ A zero-shot **CLIP** classifier (mirrored from the project's `tsn_classify.py`, 
 
 | Class | Image content | Motion sent to Wan 2.2 |
 |---|---|---|
-| **A** | aerial forest canopy / snowy plains | low fog + soft cloud shadows + faint falling snow drifting over the canopy |
-| **B** | mountain ridges, peaks, clouds | clouds & fog rolling horizontally across the ridge |
-| **C** | rivers, lakes, open water | gentle current + ripples + thin mist over glass-smooth water |
-| **D** | glaciers, frozen lakes, arctic ice | heavy snowfall cascade over the frozen landscape |
+| **A** | aerial forest canopy / snowy plains | slow drone glide, stable weather, canopy detail held sharp |
+| **B** | mountain ridges, peaks, clouds | slow glide along the ridge, existing clouds keep their coverage |
+| **C** | rivers, lakes, open water | gentle current + ripples, banks and treeline held sharp |
+| **D** | glaciers, frozen lakes, arctic ice | slow glide over the ice, cracks/texture held sharp, clear weather |
 
 All four are broad, realistic and loopable so a single prompt fits every image in its class. Edit them freely in **`config/motion_prompts.json`** — they are sent verbatim.
+
+> ⚠️ **Never ask Wan for volumetrics** (drifting fog, falling snow, rolling clouds): the sampler runs at **cfg 1** (4-step Seko distill), so the negative prompt is ignored and the positive prompt is the only steering. Volumetric wording makes Wan hallucinate soft blurry blobs that spawn/dissolve mid-clip and compound over the continuation (measured 2026-07-09: the old "heavy snowfall" / "low fog drifting" prompts were the direct cause of the spawn-despawn blob defect). Describe **camera glide + stable weather + sharp detail held steady** instead.
 
 **Native-overlap continuation (default `continuation_mode: native_overlap`).** The proven recipe — verified seamless across forest, snow, autumn-lake, green-coast, golden-mountain and marsh sources. Instead of seeding clip 2 from a single still (which gives Wan no motion context → surge, colour pop, speed jump, soft edges), the pipeline feeds **clip 1's last `overlap_frames` (17) real frames** into `WanCameraImageToVideo.start_image`. Wan masks those as *known* and generates the rest as a true continuation of their actual motion — **no surge / colour / speed / sharpness seam by construction**, in one generation.
 
@@ -53,7 +55,7 @@ All four are broad, realistic and loopable so a single prompt fits every image i
 **ESRGAN finish (default `final_upscaler: esrgan`, `finish.esrgan_finish`).** Real detail, not the soft lanczos chain:
 
 1. **Per-frame contrast de-drift** (`contrast_flatten`, default on) — Wan drifts toward higher contrast/saturation over a continuation (a "neon" end). The finisher fits the linear **trend** of per-frame luma-std + saturation and corrects *against the trend* — gentle early, **stronger toward the end** — so the drift is removed while each frame keeps its natural variation. Target = clip 1's level × `contrast_target_boost` (1.05) / `saturation_target_boost` (1.02).
-2. **Real-ESRGAN** per-frame super-res via Upscayl (`esrgan_model: remacri-4x`), then scale to **UHD `final_height` (2160)** + crisp unsharp + light grain. Upscaling can't exceed the 832×480 generation res; for *more* native detail, generate Wan larger (slower) — the upscaler is at its ceiling.
+2. **Real-ESRGAN** per-frame super-res via Upscayl (`esrgan_model: upscayl-standard-4x` — `ultramix-balanced-4x` fabricates a wire-mesh texture on open meadows, `remacri-4x` goes neon), then scale to **UHD `final_height` (2160)** + crisp unsharp + light grain + a gentle final grade (`final_grade`, default `eq=contrast=0.93:gamma=1.04:saturation=0.97` — eases the FLUX-inherited punchy tone; `""` = off). The upscaler can't invent detail past the generation res, which is why `wan_width`/`wan_height` default to **1280×720**: 720p base × 4 = exact 3840×2160 and measured **+47–92 % sharper 2160p masters** vs the old 1104×624 (at ~+65 % render time). Drop back to 1104×624 for faster drafts.
 
 Set `final_upscaler: lanczos` to fall back to the cheap ffmpeg chain on a box without the Upscayl binary. `continuation_mode: single_frame` restores the old single-still continuation (`clip2_color_match`, `trim_start_frames`, `clip2_sharpen` apply only in that mode).
 
