@@ -152,6 +152,7 @@ class TestJudgeVideo(unittest.TestCase):
 class RiskCfg(FakeCfg):
     judge_fog_cover_max = 0.28
     judge_image_min_sharp = 60.0
+    judge_min_struct_ratio = 1.0
 
 
 class TestImageRiskGate(unittest.TestCase):
@@ -177,11 +178,25 @@ class TestImageRiskGate(unittest.TestCase):
 
     def test_clean_image_falls_through_to_vlm(self):
         with mock.patch.object(judge, "image_risk_metrics",
-                               return_value={"fog_cover": 0.18, "sharp": 640}), \
+                               return_value={"fog_cover": 0.18, "sharp": 640,
+                                             "struct_ratio": 2.5}), \
              mock.patch.object(judge, "_b64_image", return_value="x"), \
              mock.patch.object(judge, "_chat", return_value="NONE"):
             ok, _ = judge.judge_image(RiskCfg(), "img.png")
         self.assertTrue(ok)
+
+    def test_uniform_micro_texture_rejects(self):
+        """A flower-meadow style frame (dense identical micro-elements, no
+        coarse structure) rejects deterministically — Wan mushes it from
+        frame 1 (the reported '240p blurry layer' master)."""
+        with mock.patch.object(judge, "image_risk_metrics",
+                               return_value={"fog_cover": 0.0, "sharp": 800,
+                                             "struct_ratio": 0.66}), \
+             mock.patch.object(judge, "_chat") as chat:
+            ok, reason = judge.judge_image(RiskCfg(), "img.png")
+        self.assertFalse(ok)
+        self.assertIn("micro-texture", reason)
+        chat.assert_not_called()
 
     def test_risk_metrics_failure_never_blocks(self):
         """CV risk gate is best-effort: an exception inside it must fall
@@ -259,6 +274,7 @@ class TestSmoothCurveAndDetailHold(unittest.TestCase):
         self.assertEqual(c.judge_image_min_sharp, 60.0)
         # a source that fails every judge retry is dropped, not shipped
         self.assertEqual(c.judge_giveup, "abandon")
+        self.assertEqual(c.judge_min_struct_ratio, 1.0)
         # video judge defaults to CV-only mode (VLM steering at image stage)
         self.assertEqual(c.judge_video_mode, "cv")
         self.assertTrue(c.judge_video_enabled)
