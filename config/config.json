@@ -23,7 +23,7 @@
   "server_host": "127.0.0.1",
   "server_port": 8790,
   "render_timeout_img": 600,
-  "render_timeout_vid": 1200,
+  "render_timeout_vid": 2400,
   "poll_seconds": 2,
   "submit_retries": 2,
   "retry_backoff_seconds": 5,

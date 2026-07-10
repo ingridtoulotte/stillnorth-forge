@@ -149,6 +149,31 @@ class TestSingleClipMode(PipelineFixture):
         self.assertFalse(c.single_clip)
 
 
+class TestAutoResumeKeepsMode(PipelineFixture):
+    def test_resume_preserves_target_mode(self):
+        """Auto-resume after a crash/restart must reuse the persisted mode —
+        resuming a target=3 run as classic full-set once rendered 48
+        unwanted flux stills."""
+        self.pipe.mode = {"target": 3}
+        self.pipe.desired_running = True
+        with mock.patch.object(self.pipe, "_pending_work", return_value=True), \
+             mock.patch.object(self.pipe, "_run"):
+            self.assertTrue(self.pipe.maybe_auto_resume())
+        self.assertEqual(self.pipe.mode, {"target": 3})
+
+    def test_resume_spent_time_budget_stays_stopped(self):
+        self.pipe.mode = {"deadline": time.time() - 10, "minutes": 5.0}
+        self.pipe.desired_running = True
+        with mock.patch.object(self.pipe, "_pending_work", return_value=True):
+            self.assertFalse(self.pipe.maybe_auto_resume())
+        self.assertFalse(self.pipe.desired_running)
+
+    def test_explicit_start_still_sets_mode(self):
+        with mock.patch.object(self.pipe, "_run"):
+            self.pipe.start(target=5)
+        self.assertEqual(self.pipe.mode, {"target": 5})
+
+
 class TestModeStops(PipelineFixture):
     def test_target_reached(self):
         self.pipe.mode = {"target": 2}

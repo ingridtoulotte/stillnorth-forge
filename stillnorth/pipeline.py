@@ -225,7 +225,7 @@ class Pipeline:
             by_src[v["src"]] = by_src.get(v["src"], 0) + 1
         return [{"src": k, "prompts": n} for k, n in sorted(by_src.items())]
 
-    def start(self, target=None, minutes=None):
+    def start(self, target=None, minutes=None, keep_mode=False):
         """Start the worker if not already running (idempotent).
 
         target  — stop once this many masters have been produced AND accepted
@@ -234,11 +234,17 @@ class Pipeline:
         minutes — time budget: produce as many accepted masters as possible,
                   then stop (the item being rendered is finished, not killed).
         Neither — classic behaviour: process every queued prompt.
+        keep_mode — auto-resume path: reuse the persisted mode instead of
+                  clobbering it to classic full-set (a target=3 run that got
+                  restarted mid-flight once resumed as "render everything"
+                  and burned the GPU on 48 unwanted flux renders).
         """
         with self.lock:
             if self._thread and self._thread.is_alive():
                 return False
-            if target:
+            if keep_mode:
+                pass                     # self.mode already holds the run's mode
+            elif target:
                 self.mode = {"target": int(target)}
             elif minutes:
                 self.mode = {"deadline": time.time() + float(minutes) * 60,
@@ -325,8 +331,14 @@ class Pipeline:
         was closed or the PC shut down (intent persisted, work still pending),
         resume it automatically -- no need to press Run again."""
         if self.desired_running and self._pending_work():
+            m = self.mode or {}
+            if m.get("deadline") and time.time() >= m["deadline"]:
+                self.desired_running = False   # budget already spent
+                with self.lock:
+                    self._save_state()
+                return False
             self._log("auto-resume: batch was running before shutdown — resuming")
-            return self.start()
+            return self.start(keep_mode=True)
         return False
 
     def _active_stages(self):
