@@ -57,6 +57,38 @@ class TestVerdictParsing(unittest.TestCase):
         ok, _ = judge._parse_verdict("Everything looks plausible to me.")
         self.assertTrue(ok)
 
+    def test_notdrone_rejects(self):
+        """Composition off-brief (ground-level macro instead of an aerial
+        shot) rejects so the source regenerates."""
+        ok, r = judge._parse_verdict("NOTDRONE: ground-level tulip close-up")
+        self.assertFalse(ok)
+        self.assertIn("tulip", r)
+
+    def test_notdrone_on_later_line_rejects(self):
+        ok, _ = judge._parse_verdict(
+            "Looks sharp overall.\nNOTDRONE: macro shot of moss")
+        self.assertFalse(ok)
+
+    def test_image_prompt_targets_composition(self):
+        self.assertIn("VANTAGE: GROUND", judge.IMAGE_PROMPT)
+        self.assertIn("close-up", judge.IMAGE_PROMPT)
+
+    def test_vantage_ground_rejects(self):
+        ok, r = judge._parse_verdict(
+            "VANTAGE: GROUND — eye-level flower bed\nNONE")
+        self.assertFalse(ok)
+        self.assertIn("off-brief", r)
+
+    def test_vantage_air_passes(self):
+        ok, _ = judge._parse_verdict(
+            "VANTAGE: AIR — high above a valley\nNONE")
+        self.assertTrue(ok)
+
+    def test_vantage_air_with_impossible_still_rejects(self):
+        ok, _ = judge._parse_verdict(
+            "VANTAGE: AIR — high above a valley\nIMPOSSIBLE: melted trees")
+        self.assertFalse(ok)
+
 
 class TestJudgeImage(unittest.TestCase):
     def test_ollama_down_passes_unjudged(self):
@@ -225,9 +257,45 @@ class TestSmoothCurveAndDetailHold(unittest.TestCase):
         # judge risk-gate defaults
         self.assertEqual(c.judge_fog_cover_max, 0.28)
         self.assertEqual(c.judge_image_min_sharp, 60.0)
+        # a source that fails every judge retry is dropped, not shipped
+        self.assertEqual(c.judge_giveup, "abandon")
         # video judge defaults to CV-only mode (VLM steering at image stage)
         self.assertEqual(c.judge_video_mode, "cv")
         self.assertTrue(c.judge_video_enabled)
+
+    def test_detail_hold_skips_fabricated_periodic_frames(self):
+        """A soft frame carrying a strong periodic micro-pattern (the SR
+        chain-mail/knit fabrication) must NOT be amplified by detail_hold —
+        unsharp on fabricated texture makes the artifact worse."""
+        import numpy as np
+        import cv2
+        import tempfile
+        from stillnorth.finish import _detail_hold
+
+        d = tempfile.mkdtemp(prefix="snf_dh_")
+        rng = np.random.RandomState(7)
+        files = []
+        # sharp organic frames set a high p80 baseline
+        for i in range(4):
+            f = rng.randint(0, 255, (256, 256, 3)).astype("uint8")
+            p = os.path.join(d, f"a{i}.png")
+            cv2.imwrite(p, f)
+            files.append(p)
+        # soft frame with a strong fine checkerboard = fabricated pattern
+        yy, xx = np.mgrid[0:256, 0:256]
+        checker = (((xx // 2 + yy // 2) % 2) * 40 + 100).astype("uint8")
+        soft = cv2.merge([checker] * 3)
+        p_bad = os.path.join(d, "bad.png")
+        cv2.imwrite(p_bad, soft)
+        files.append(p_bad)
+        before = cv2.imread(p_bad).copy()
+
+        class C:
+            detail_hold_max = 1.5
+        _detail_hold(files, C(), sigma=1.2)
+        after = cv2.imread(p_bad)
+        self.assertTrue(np.array_equal(before, after),
+                        "periodic frame was amplified")
 
     def test_video_check_parses_bool_and_string(self):
         from stillnorth.config import Config

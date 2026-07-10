@@ -225,7 +225,7 @@ class Pipeline:
             by_src[v["src"]] = by_src.get(v["src"], 0) + 1
         return [{"src": k, "prompts": n} for k, n in sorted(by_src.items())]
 
-    def start(self, target=None, minutes=None):
+    def start(self, target=None, minutes=None, keep_mode=False):
         """Start the worker if not already running (idempotent).
 
         target  — stop once this many masters have been produced AND accepted
@@ -234,11 +234,17 @@ class Pipeline:
         minutes — time budget: produce as many accepted masters as possible,
                   then stop (the item being rendered is finished, not killed).
         Neither — classic behaviour: process every queued prompt.
+        keep_mode — auto-resume path: reuse the persisted mode instead of
+                  clobbering it to classic full-set (a target=3 run that got
+                  restarted mid-flight once resumed as "render everything"
+                  and burned the GPU on 48 unwanted flux renders).
         """
         with self.lock:
             if self._thread and self._thread.is_alive():
                 return False
-            if target:
+            if keep_mode:
+                pass                     # self.mode already holds the run's mode
+            elif target:
                 self.mode = {"target": int(target)}
             elif minutes:
                 self.mode = {"deadline": time.time() + float(minutes) * 60,
@@ -325,14 +331,20 @@ class Pipeline:
         was closed or the PC shut down (intent persisted, work still pending),
         resume it automatically -- no need to press Run again."""
         if self.desired_running and self._pending_work():
+            m = self.mode or {}
+            if m.get("deadline") and time.time() >= m["deadline"]:
+                self.desired_running = False   # budget already spent
+                with self.lock:
+                    self._save_state()
+                return False
             self._log("auto-resume: batch was running before shutdown — resuming")
-            return self.start()
+            return self.start(keep_mode=True)
         return False
 
     def _active_stages(self):
         """Producing stages that actually run in the current mode, in order.
         native_overlap + native_long both skip the still-seed stages."""
-        if self.cfg.native_long:
+        if self.cfg.native_long or self.cfg.single_clip:
             return ["img_up", "vid1", "concat", "final_up"]
         if self.cfg.continuation_mode == "native_overlap":
             return ["img_up", "vid1", "vid2", "concat", "final_up"]
@@ -673,9 +685,19 @@ class Pipeline:
                     n = self.img_rejects.get(k, 0) + 1
                     self.img_rejects[k] = n
                     if n > self.cfg.judge_image_retries:
-                        self.judged[k] = True
-                        self._log(f"judge_flux {k}: accepted after {n - 1} "
-                                  f"rejects (giving up) — last: {reason}")
+                        if self.cfg.judge_giveup == "accept":
+                            self.judged[k] = True
+                            self._log(f"judge_flux {k}: accepted after {n - 1} "
+                                      f"rejects (giving up) — last: {reason}")
+                        else:
+                            # quality-first: a source that failed every retry
+                            # would cost ~14 min of doomed Wan renders — drop
+                            # the key and let the run pull the next prompt.
+                            if k not in self.abandoned:
+                                self.abandoned.append(k)
+                            self._delete_key_files(k, flux_too=True)
+                            self._log(f"judge_flux {k}: abandoned after "
+                                      f"{n - 1} rejects — last: {reason}")
                     else:
                         self._delete_key_files(k, flux_too=True)
                         self._log(f"judge_flux REJECT {k} "
@@ -866,8 +888,8 @@ class Pipeline:
 
     # ---- STAGE 5: last frame of each first clip --------------------------
     def _stage_lastframe(self):
-        if self.cfg.native_long:      # one native clip -> no continuation chain
-            return 0
+        if self.cfg.native_long or self.cfg.single_clip:
+            return 0                  # one clip -> no continuation chain
         if self.cfg.continuation_mode == "native_overlap":
             return 0                  # continuation reads frames from clip1 directly
         src_dir = self.cfg.stage_dir("vid1", ensure=False)
@@ -922,6 +944,8 @@ class Pipeline:
     # ---- STAGE 7: continuation Wan clips (forced same direction) ---------
     def _stage_vid2(self):
         if self.cfg.native_long:      # whole clip already rendered in stage vid1
+            return 0
+        if self.cfg.single_clip:      # vid1 IS the master -- no continuation
             return 0
         if self.cfg.continuation_mode == "native_overlap":
             return self._stage_vid2_native()
@@ -1052,10 +1076,10 @@ class Pipeline:
     # ---- STAGE 8: concat clip1 + clip2 -> ~10-11s ------------------------
     def _stage_concat(self):
         d1 = self.cfg.stage_dir("vid1", ensure=False)
-        # native_long: the ~10s clip is the single vid1 render -> there is no
-        # clip2 to join, so just promote vid1 to the concat output unchanged
-        # (a copy, no re-encode) and final_up upscales it like any other.
-        native = self.cfg.native_long
+        # native_long / single_clip: there is no clip2 to join, so just
+        # promote vid1 to the concat output unchanged (a copy, no re-encode)
+        # and final_up upscales it like any other.
+        native = self.cfg.native_long or self.cfg.single_clip
         stems = [s for s in self._stems_with_clip(d1)
                  if (native or self._clip_path("vid2", s))
                  and not self._exists("concat", s, video=True)
@@ -1133,6 +1157,24 @@ class Pipeline:
         if self.cfg.wan_width and self.cfg.wan_height:
             g[wf["node_camera"]]["inputs"]["width"] = self.cfg.wan_width
             g[wf["node_camera"]]["inputs"]["height"] = self.cfg.wan_height
+        self._apply_sampler_steps(g, wf)
+
+    def _apply_sampler_steps(self, g, wf):
+        """Inject the configured sampler step count into the two-expert
+        KSamplerAdvanced pair (high-noise then low-noise model). The split
+        point stays at half: matched-seed A/B on a worst-case busy source
+        measured end-of-clip texture melt 15% @4 steps, 10% @6, 3% @8 —
+        with render time scaling roughly linearly (311s/498s/632s vid1).
+        0 = keep the workflow's exported step count (4, Seko distill)."""
+        steps = int(getattr(self.cfg, "wan_steps", 0) or 0)
+        n1, n2 = wf.get("node_sampler1"), wf.get("node_sampler2")
+        if not steps or not n1 or not n2:
+            return
+        split = steps // 2
+        g[n1]["inputs"].update({"steps": steps, "start_at_step": 0,
+                                "end_at_step": split})
+        g[n2]["inputs"].update({"steps": steps, "start_at_step": split,
+                                "end_at_step": steps})
 
     # -- Wan clip submit (shared by vid1 + vid2) ---------------------------
     def _wan_clip(self, base, wf, src_dir, stem, letter, pose, speed, out_stage,

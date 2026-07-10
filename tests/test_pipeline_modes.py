@@ -106,6 +106,74 @@ class TestActiveSet(PipelineFixture):
         self.assertEqual(len(active), WAVE_SIZE)
 
 
+class TestSingleClipMode(PipelineFixture):
+    def test_active_stages_skip_continuation(self):
+        self.pipe.cfg.native_long = False
+        self.pipe.cfg.single_clip = True
+        self.pipe.cfg.continuation_mode = "native_overlap"
+        self.assertEqual(self.pipe._active_stages(),
+                         ["img_up", "vid1", "concat", "final_up"])
+
+    def test_vid2_stage_skipped(self):
+        self.pipe.cfg.native_long = False
+        self.pipe.cfg.single_clip = True
+        self.assertEqual(self.pipe._stage_vid2(), 0)
+
+    def test_concat_promotes_vid1(self):
+        self.pipe.cfg.native_long = False
+        self.pipe.cfg.single_clip = True
+        self.pipe.cfg.continuation_mode = "native_overlap"
+        self.add_prompts(["k1"])
+        self.pipe.letters["k1"] = "A"
+        touch(os.path.join(self.ws, STAGE_DIRS["vid1"], "A_k1.mp4"))
+        self.assertEqual(self.pipe._stage_concat(), 1)
+        self.assertTrue(os.path.exists(
+            os.path.join(self.ws, STAGE_DIRS["concat"], "A_k1.mp4")))
+
+    def test_config_default_off(self):
+        from stillnorth.config import Config
+        c = Config.__new__(Config)
+        c.raw = {"comfy_server": "x", "ffmpeg": "ffmpeg",
+                 "comfy_input_dir": ".", "comfy_output_dir": ".",
+                 "workspace_subdir": "W", "server_host": "127.0.0.1",
+                 "server_port": 1, "render_timeout_img": 1,
+                 "render_timeout_vid": 1, "poll_seconds": 1,
+                 "image_upscale_mult": 2, "lastframe_upscale_mult": 4,
+                 "final_upscale_mult": 4, "fps": 16, "video_cq": 19,
+                 "nvenc": True, "upscale_denoise": "", "upscale_sharp": "",
+                 "upscale_grain": ""}
+        with mock.patch("stillnorth.config._load",
+                        side_effect=[c.raw, {}, {"poses": [], "speed_by_pose": {},
+                                                 "classes": {}}]):
+            c.reload()
+        self.assertFalse(c.single_clip)
+
+
+class TestAutoResumeKeepsMode(PipelineFixture):
+    def test_resume_preserves_target_mode(self):
+        """Auto-resume after a crash/restart must reuse the persisted mode —
+        resuming a target=3 run as classic full-set once rendered 48
+        unwanted flux stills."""
+        self.pipe.mode = {"target": 3}
+        self.pipe.desired_running = True
+        with mock.patch.object(self.pipe, "_pending_work", return_value=True), \
+             mock.patch.object(self.pipe, "_run"):
+            self.assertTrue(self.pipe.maybe_auto_resume())
+        self.assertEqual(self.pipe.mode, {"target": 3})
+
+    def test_resume_spent_time_budget_stays_stopped(self):
+        self.pipe.mode = {"deadline": time.time() - 10, "minutes": 5.0}
+        self.pipe.desired_running = True
+        with mock.patch.object(self.pipe, "_pending_work", return_value=True):
+            self.assertFalse(self.pipe.maybe_auto_resume())
+        self.assertFalse(self.pipe.desired_running)
+
+    def test_explicit_start_still_sets_mode(self):
+        with mock.patch.object(self.pipe, "_run"):
+            self.pipe.start(target=5)
+        self.assertEqual(self.pipe.mode, {"target": 5})
+
+
 class TestModeStops(PipelineFixture):
     def test_target_reached(self):
         self.pipe.mode = {"target": 2}

@@ -676,6 +676,23 @@ def _detail_hold(files, cfg, sigma=1.2):
             g = cv2.resize(g, (960, int(h * 960 / w)))
         return cv2.Laplacian(g, cv2.CV_64F).var()
 
+    def periodicity(p):
+        # FFT ring ratio: energy at 0.35-0.75 nyquist vs low frequencies.
+        # Fabricated SR micro-patterns (chain-mail dots, knit loops, leaf
+        # veins) read 15-25 on production frames; clean organic texture
+        # reads 4-8. Unsharp on a fabricated frame amplifies the pattern,
+        # so the boost fades out as periodicity rises.
+        g = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
+        h, w = g.shape
+        c = g[h // 4:h * 3 // 4, w // 4:w * 3 // 4]
+        c = cv2.resize(c, (512, 512)).astype(np.float32)
+        f = np.abs(np.fft.fftshift(np.fft.fft2(c - c.mean())))
+        yy, xx = np.mgrid[-256:256, -256:256]
+        r = np.sqrt(xx * xx + yy * yy) / 256.0
+        hi = f[(r > 0.35) & (r < 0.75)].mean()
+        lo = f[(r > 0.02) & (r < 0.15)].mean()
+        return hi / (lo + 1e-6) * 100
+
     S = _smooth_curve([sharp(p) for p in files])
     # anchor to the clip's own best level (p80), not the first frames --
     # clips routinely START soft (Wan warms up out of the still) and sag
@@ -687,6 +704,11 @@ def _detail_hold(files, cfg, sigma=1.2):
         a = gain - 1.0
         if a < 0.02:
             continue
+        ms = periodicity(p)
+        if ms >= 12.0:                # fabricated pattern -- never amplify
+            continue
+        if ms > 8.0:                  # fade the boost through the gray zone
+            a *= (12.0 - ms) / 4.0
         f = cv2.imread(p).astype(np.float32)
         blur = cv2.GaussianBlur(f, (0, 0), sigma)
         cv2.imwrite(p, np.clip(f + a * (f - blur), 0, 255).astype("uint8"))

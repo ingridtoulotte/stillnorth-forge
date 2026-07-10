@@ -71,6 +71,12 @@ class Config:
         # proven "11s natif" fix. Falls back to continuation if disabled.
         self.native_long = bool(self.raw.get("native_long", False))
         self.native_frames = int(self.raw.get("native_long_frames", 161))
+        # single_clip: stop at vid1 -- no continuation, no seam. Masters are
+        # ~5s instead of ~10s, per-master render time roughly halves, and
+        # Wan's texture melt is capped at what a single 81-frame clip
+        # accumulates (the continuation is where melt compounds). The
+        # assembler just draws more clips per compilation.
+        self.single_clip = bool(self.raw.get("single_clip", False))
         # continuation polish: drop the first few frames of clip 1 (img2vid
         # start glitch) and sharpen clip 2 to match clip 1 (the continuation
         # clip drifts slightly soft). Empty clip2_sharpen disables sharpening.
@@ -146,6 +152,11 @@ class Config:
         # was the 480p base, not the upscaler. 0 = leave workflow untouched.
         self.wan_width = int(self.raw.get("wan_width", 0))
         self.wan_height = int(self.raw.get("wan_height", 0))
+        # Wan sampler steps across the two-expert pair (0 = workflow's own,
+        # i.e. the 4-step Seko distill). 6 measured 10% end-of-clip texture
+        # melt vs 15% at 4 on a worst-case busy source; 8 nearly flat (3%)
+        # at ~2x render time. Split point is steps//2.
+        self.wan_steps = int(self.raw.get("wan_steps", 0))
         self.fps = int(self.raw["fps"])
         self.cq = int(self.raw["video_cq"])
         self.nvenc = bool(self.raw["nvenc"])
@@ -241,6 +252,12 @@ class Config:
         # re-tune when more verdicted samples exist)
         self.judge_fog_cover_max = float(j.get("fog_cover_max", 0.28))
         self.judge_image_min_sharp = float(j.get("image_min_sharp", 60.0))
+        # What to do when a FLUX source fails every judge retry:
+        # "abandon" (default) drops the key -- a source the judge keeps
+        # rejecting would burn ~14 GPU-minutes of doomed Wan renders and
+        # land a defective master; "accept" restores the old keep-going
+        # behaviour for runs where every prompt must yield a clip.
+        self.judge_giveup = str(j.get("giveup", "abandon")).lower()
 
         # folder scanned for HTML prompt files on every pass -- drop files
         # there instead of uploading through the UI. Default lives inside the
