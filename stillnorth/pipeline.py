@@ -271,9 +271,14 @@ class Pipeline:
 
     def accepted_count(self):
         """Masters produced AND accepted. With the video judge on, only
-        judged-OK masters count; otherwise any existing master does."""
+        judged-OK masters count — and only while the master still exists
+        (in 09_final_up4 or moved into a library bucket). A stale accept
+        for a manually archived/deleted master once made target mode
+        declare victory without rendering a replacement."""
         if self.cfg.judge_enabled and self.cfg.judge_video_enabled:
-            return sum(1 for v in self.vid_judged.values() if v)
+            return sum(1 for stem, v in self.vid_judged.items()
+                       if v and (self._exists("final_up", stem, video=True)
+                                 or lib.master_exists(self.cfg, stem)))
         return self._count("final_up")
 
     def _target_reached(self):

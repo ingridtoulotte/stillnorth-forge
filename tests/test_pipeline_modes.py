@@ -88,6 +88,7 @@ class TestActiveSet(PipelineFixture):
         self.pipe.mode = {"target": 1}
         self.pipe.letters["k1"] = "A"
         self.pipe.vid_judged["A_k1"] = True
+        touch(os.path.join(self.ws, STAGE_DIRS["final_up"], "A_k1.mp4"))
         active = self.pipe._pick_active()
         self.assertEqual(len(active), 0)   # target already satisfied
 
@@ -174,15 +175,33 @@ class TestAutoResumeKeepsMode(PipelineFixture):
         self.assertEqual(self.pipe.mode, {"target": 5})
 
 
+class TestAcceptedCountsOnlyExistingMasters(PipelineFixture):
+    def test_stale_accept_for_archived_master_not_counted(self):
+        """An accept whose master was manually archived/deleted must not
+        count toward the target — it once made target mode declare victory
+        without rendering a replacement."""
+        self.pipe.cfg.judge_enabled = True
+        self.pipe.cfg.judge_video_enabled = True
+        touch(os.path.join(self.ws, STAGE_DIRS["final_up"], "A_k1.mp4"))
+        self.pipe.vid_judged = {"A_k1": True, "A_gone": True}
+        with mock.patch("stillnorth.pipeline.lib.master_exists",
+                        return_value=False):
+            self.assertEqual(self.pipe.accepted_count(), 1)
+
+
 class TestModeStops(PipelineFixture):
     def test_target_reached(self):
         self.pipe.mode = {"target": 2}
         self.pipe.vid_judged = {"A_k1": True, "B_k2": True}
+        touch(os.path.join(self.ws, STAGE_DIRS["final_up"], "A_k1.mp4"))
+        touch(os.path.join(self.ws, STAGE_DIRS["final_up"], "B_k2.mp4"))
         self.assertTrue(self.pipe._target_reached())
 
     def test_target_counts_only_accepted(self):
         self.pipe.mode = {"target": 2}
         self.pipe.vid_judged = {"A_k1": True, "B_k2": False}
+        touch(os.path.join(self.ws, STAGE_DIRS["final_up"], "A_k1.mp4"))
+        touch(os.path.join(self.ws, STAGE_DIRS["final_up"], "B_k2.mp4"))
         self.assertFalse(self.pipe._target_reached())
 
     def test_time_up(self):
