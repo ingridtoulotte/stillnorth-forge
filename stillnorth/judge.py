@@ -34,9 +34,15 @@ import urllib.request
 # IMPOSSIBLE rejects, and natural repetition is explicitly ruled out
 # (uniform ripples/mist were the dominant false-positive source).
 IMAGE_PROMPT = (
-    "This is supposed to be a real photograph taken from a drone over "
-    "Nordic nature. Examine it carefully. Classify it:\n"
-    "- If it is plausible as real drone footage, reply exactly: NONE\n"
+    "Look at this nature photograph and answer in exactly two lines.\n"
+    "Line 1 — from WHERE was the camera when this was taken? Reply exactly "
+    "one of:\n"
+    "VANTAGE: AIR — camera clearly airborne (drone/helicopter), high above "
+    "the ground, looking down or out over a wide landscape\n"
+    "VANTAGE: GROUND — camera at or near ground level: a close-up of "
+    "flowers/moss/water, a subject a few meters away, an eye-level view\n"
+    "Line 2 — classify the image content:\n"
+    "- If it is plausible as a real photograph, reply exactly: NONE\n"
     "- If something looks odd but could occur in a real photo, reply: "
     "MINOR: <what>\n"
     "- ONLY if something could absolutely not exist in a real photograph, "
@@ -50,7 +56,7 @@ IMAGE_PROMPT = (
     "or structures, and distinct vertical COLUMNS of steam or smoke rising "
     "from the ground like geysers or chimneys where nothing could produce "
     "them (horizontal fog banks and valley mist are fine and normal). "
-    "One line only."
+    "Two lines only."
 )
 
 VIDEO_PROMPT = (
@@ -123,6 +129,17 @@ def _parse_verdict(text):
     first = t.splitlines()[0].strip().upper()
     if first.startswith("IMPOSSIBLE") or "\nIMPOSSIBLE:" in t.upper():
         return False, t.replace("\n", " ")[:160]
+    # Composition off-brief: the vantage-first protocol asks the VLM to
+    # commit to AIR vs GROUND before judging content — a GROUND verdict
+    # (ground-level close-up / macro) rejects so the source regenerates
+    # instead of shipping a "drone" master that was never an aerial shot.
+    # (Calibrated 2026-07-10: catches the ground-level tulip-field case;
+    # asking the same thing as a NOTDRONE severity option was ignored.)
+    up = t.upper()
+    if first.startswith("NOTDRONE") or "\nNOTDRONE:" in up:
+        return False, t.replace("\n", " ")[:160]
+    if "VANTAGE: GROUND" in up or first.startswith("VANTAGE: GROUND"):
+        return False, ("off-brief: " + t.replace("\n", " "))[:160]
     return True, t.replace("\n", " ")[:160]
 
 

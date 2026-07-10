@@ -15,6 +15,7 @@
     "node_camera": "87", "field_pose":   "camera_pose", "field_speed": "speed",
     "node_length": "87", "field_length": "length",
     "node_seed":   "71", "field_seed":   "noise_seed",
+    "node_sampler1": "71", "node_sampler2": "78",
     "node_save":   "73", "field_save":   "filename_prefix",
     "node_wci2v":  "80", "field_start_image": "start_image",
     "field_camera_cond": "camera_conditions"
