@@ -252,6 +252,11 @@ class Config:
         # re-tune when more verdicted samples exist)
         self.judge_fog_cover_max = float(j.get("fog_cover_max", 0.28))
         self.judge_image_min_sharp = float(j.get("image_min_sharp", 60.0))
+        # min_struct_ratio — reject stills that are a uniform field of
+        # dense micro-elements with no coarse structure (flower/tulip
+        # meadows): Wan temporally averages them into "240p" mush from
+        # frame 1. Calibrated: mushed sources 0.47/0.67, clean >= 1.3.
+        self.judge_min_struct_ratio = float(j.get("min_struct_ratio", 1.0))
         # What to do when a FLUX source fails every judge retry:
         # "abandon" (default) drops the key -- a source the judge keeps
         # rejecting would burn ~14 GPU-minutes of doomed Wan renders and

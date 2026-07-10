@@ -165,22 +165,52 @@ def image_risk_metrics(path, scale_w=768):
     master came back with fog-smear covered ~half the frame; clean sources
     measure near zero.
     sharp — global Laplacian variance; catches an outright blurry FLUX
-    render before 14 minutes of GPU time get spent animating it."""
+    render before 14 minutes of GPU time get spent animating it.
+    struct_ratio — coarse-structure gradient energy over median fine-tile
+    energy. A frame that is a uniform field of thousands of near-identical
+    micro-elements (flower meadow, tulip field) gives Wan no stable
+    structure to track: it temporally averages the texture into a soft
+    "240p" mush from the very first frame. Calibrated on the labeled
+    production library (2026-07-10): mushed sources read 0.47/0.67, every
+    clean source reads >= 1.3 — a 2x margin."""
     import cv2
     import numpy as np
-    img = cv2.imread(path)
-    if img is None:
-        return {"fog_cover": 0.0, "sharp": 1e9}
-    h, w = img.shape[:2]
+    orig = cv2.imread(path)
+    if orig is None:
+        return {"fog_cover": 0.0, "sharp": 1e9, "struct_ratio": 1e9}
+    h, w = orig.shape[:2]
+    img = orig
     if w > scale_w:
-        img = cv2.resize(img, (scale_w, int(h * scale_w / w)),
+        img = cv2.resize(orig, (scale_w, int(h * scale_w / w)),
                          interpolation=cv2.INTER_AREA)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     lap = cv2.Laplacian(g, cv2.CV_64F)
     tex = cv2.blur(np.abs(lap), (15, 15))
     fog = (g > 165) & (hsv[..., 1] < 45) & (tex < 2.0)
-    return {"fog_cover": float(fog.mean()), "sharp": float(lap.var())}
+
+    # struct_ratio needs the fine texture the 768px resize destroys —
+    # measure at the Wan render scale (1280 wide), where it was calibrated.
+    g12 = cv2.cvtColor(cv2.resize(orig, (1280, int(h * 1280 / w)),
+                                  interpolation=cv2.INTER_AREA),
+                       cv2.COLOR_BGR2GRAY)
+    gf = g12.astype(np.float32)
+    hf = gf - cv2.GaussianBlur(gf, (0, 0), 1.5)
+    E = hf * hf
+    hh, ww = E.shape
+    th, tw = max(1, hh // 24), max(1, ww // 40)
+    tiles = [E[y * th:(y + 1) * th, x * tw:(x + 1) * tw].mean()
+             for y in range(24) for x in range(40)]
+    med_fine = float(np.median(tiles))
+    coarse = cv2.GaussianBlur(gf, (0, 0), 8)
+    gx = cv2.Sobel(coarse, cv2.CV_32F, 1, 0)
+    gy = cv2.Sobel(coarse, cv2.CV_32F, 0, 1)
+    struct = float((gx * gx + gy * gy).mean())
+    ratio = struct / max(med_fine, 1e-6) if med_fine > 25 else 1e9
+    # (low fine energy = no dense micro-texture at all -> not this failure
+    # mode; the sharp/fog gates own those cases)
+    return {"fog_cover": float(fog.mean()), "sharp": float(lap.var()),
+            "struct_ratio": ratio}
 
 
 def judge_image(cfg, path):
@@ -201,6 +231,12 @@ def judge_image(cfg, path):
             return False, (f"animate-risk: image too soft "
                            f"(sharpness {rm['sharp']:.0f} < "
                            f"{cfg.judge_image_min_sharp:.0f})")
+        if rm["struct_ratio"] < cfg.judge_min_struct_ratio:
+            return False, (f"animate-risk: uniform micro-texture, no coarse "
+                           f"structure (ratio {rm['struct_ratio']:.2f} < "
+                           f"{cfg.judge_min_struct_ratio:.2f}) — Wan "
+                           "temporally averages dense identical elements "
+                           "into mush")
     except Exception:
         pass                                     # CV gate is best-effort
     try:
