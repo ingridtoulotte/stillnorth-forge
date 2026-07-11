@@ -605,13 +605,18 @@ class Pipeline:
         while time.time() < end and not self.cancel_flag:
             time.sleep(0.25)
 
-    def _submit(self, wf, timeout, stage):
+    def _submit(self, wf, timeout, stage, reseed=None):
         attempts = self.cfg.submit_retries + 1
         t0 = time.time()
         last = "queue failed"
         for a in range(attempts):
             if self.cancel_flag:
                 return False, "cancelled"
+            if a and reseed:
+                # A re-queued graph identical to a finished one is
+                # cache-collapsed by ComfyUI into a completed history with
+                # no outputs -> every retry instantly fails "no output".
+                reseed(wf)
             try:
                 pid = self.comfy.queue(wf)
             except Exception as e:
@@ -626,11 +631,39 @@ class Pipeline:
                 return True, msg
             if msg == "cancelled":
                 return False, "cancelled"
+            if msg == "timeout":
+                # The job is still running server-side after a wait timeout:
+                # left alone it keeps the GPU for up to ~40 more minutes and
+                # the retry just queues behind it. Free the GPU first.
+                self.comfy.interrupt()
             last = self._categorize(msg)
             self._log(f"{stage} render failed (try {a + 1}/{attempts}): {last}")
             self._backoff(a)
         self._record(stage, time.time() - t0, False)
         return False, last
+
+    def _salvage_render(self, stage, stem, expect_frames=0):
+        """A completed render may still land on disk after _submit failed:
+        a timed-out job can finish server-side after we stopped waiting
+        (its output keeps ComfyUI's _00001_ suffix, never renamed), and a
+        cache-collapsed retry reports "no output" while the original file
+        exists. Rescue it instead of re-rendering the whole clip."""
+        p = comfymod.rename_out(self.cfg.stage_dir(stage), stem,
+                                (".mp4", ".webm"))
+        if not p:
+            return False
+        if expect_frames:
+            n = self._clip_nframes(p)
+            if n < expect_frames - 1:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+                self._log(f"{stage} salvage {stem}: incomplete "
+                          f"({n}/{expect_frames} frames) — discarded")
+                return False
+        self._log(f"{stage} salvaged completed render {stem}")
+        return True
 
     # ---- STAGE 1: FLUX images --------------------------------------------
     def _stage_flux(self):
@@ -1041,6 +1074,7 @@ class Pipeline:
             else:
                 self._log(f"vid2 seed-restore failed {stem} — raw tail used")
                 restored = None
+        src_text = self.prompts.get(stem.split("_", 1)[-1], {}).get("text", "")
         g["200"] = {"class_type": "VHS_LoadVideoPath",
                     "_meta": {"title": "clip1 tail"},
                     "inputs": {"video": seed_path, "force_rate": 0.0,
@@ -1049,7 +1083,8 @@ class Pipeline:
                                "skip_first_frames": skip,
                                "select_every_nth": 1}}
         g[wf["node_wci2v"]]["inputs"][wf["field_start_image"]] = ["200", 0]
-        g[wf["node_text"]]["inputs"][wf["field_text"]] = self.cfg.motion_text(letter)
+        g[wf["node_text"]]["inputs"][wf["field_text"]] = \
+            self.cfg.motion_text(letter, src_text)
         if wf.get("node_length"):
             g[wf["node_length"]]["inputs"][wf["field_length"]] = \
                 int(self.cfg.continuation_length)
@@ -1066,7 +1101,10 @@ class Pipeline:
         g[wf["node_seed"]]["inputs"][wf["field_seed"]] = random.randint(0, 2**31 - 1)
         g[wf["node_save"]]["inputs"][wf["field_save"]] = \
             self.cfg.comfy_prefix("vid2", stem)
-        ok, msg = self._submit(g, self.cfg.timeout_vid, "vid2")
+        ok, msg = self._submit(
+            g, self.cfg.timeout_vid, "vid2",
+            reseed=lambda gg: gg[wf["node_seed"]]["inputs"].update(
+                {wf["field_seed"]: random.randint(0, 2**31 - 1)}))
         if restored:
             try:
                 os.remove(restored)
@@ -1074,6 +1112,9 @@ class Pipeline:
                 pass
         if ok and comfymod.rename_out(self.cfg.stage_dir("vid2"), stem,
                                       (".mp4", ".webm")):
+            return True
+        if not ok and self._salvage_render(
+                "vid2", stem, int(self.cfg.continuation_length)):
             return True
         self._log(f"vid2 continuation FAIL {stem}: {msg}")
         return False
@@ -1195,19 +1236,26 @@ class Pipeline:
         g = json.loads(json.dumps(base))
         self._apply_render_res(g, wf)
         g[wf["node_image"]]["inputs"][wf["field_image"]] = stem + ".png"
-        g[wf["node_text"]]["inputs"][wf["field_text"]] = self.cfg.motion_text(letter)
+        g[wf["node_text"]]["inputs"][wf["field_text"]] = self.cfg.motion_text(
+            letter, self.prompts.get(stem.split("_", 1)[-1], {}).get("text", ""))
         g[wf["node_camera"]]["inputs"][wf["field_pose"]] = pose
         g[wf["node_camera"]]["inputs"][wf["field_speed"]] = speed
         if length and wf.get("node_length"):
             g[wf["node_length"]]["inputs"][wf["field_length"]] = int(length)
         g[wf["node_seed"]]["inputs"][wf["field_seed"]] = random.randint(0, 2**31 - 1)
         g[wf["node_save"]]["inputs"][wf["field_save"]] = self.cfg.comfy_prefix(out_stage, stem)
-        ok, msg = self._submit(g, self.cfg.timeout_vid, out_stage)
+        ok, msg = self._submit(
+            g, self.cfg.timeout_vid, out_stage,
+            reseed=lambda gg: gg[wf["node_seed"]]["inputs"].update(
+                {wf["field_seed"]: random.randint(0, 2**31 - 1)}))
         try:
             os.remove(staged)
         except OSError:
             pass
         if ok and comfymod.rename_out(self.cfg.stage_dir(out_stage), stem, (".mp4", ".webm")):
+            return True
+        if not ok and self._salvage_render(out_stage, stem,
+                                           int(length) if length else 81):
             return True
         self._log(f"{out_stage} FAIL {stem}: {msg}")
         return False
