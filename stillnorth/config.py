@@ -7,6 +7,7 @@ the per-stage working directories.
 """
 import json
 import os
+import re
 
 # repo root = parent of this package
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -274,6 +275,7 @@ class Config:
         self.poses = self.motion["poses"]
         self.speed_by_pose = self.motion["speed_by_pose"]
         self.classes = self.motion["classes"]
+        self.flux_suffixes = self.motion.get("flux_suffixes", [])
 
         # long-video assembler (all optional, with safe defaults)
         a = self.raw.get("assembler", {})
@@ -309,8 +311,34 @@ class Config:
     def workflow_path(self, which):
         return os.path.join(ROOT, self.workflows[which]["file"])
 
-    def motion_text(self, letter):
-        return self.classes[letter]["motion"]
+    def flux_text(self, prompt_text):
+        """FLUX prompt with any keyword-matched suffix appended. Waterfall
+        sources need fast-shutter/droplet language: FLUX's default
+        long-exposure silky falls give Wan nothing to move (matched-seed A/B:
+        falls stayed frozen at ~0 px/frame; a fast-shutter source unlocked
+        +0.47 px/frame sustained downward flow)."""
+        text = prompt_text or ""
+        low = text.lower()
+        for sf in self.flux_suffixes:
+            if any(re.search(r"\b" + re.escape(k.lower()), low)
+                   for k in sf.get("keywords", ())):
+                return text + sf["suffix"]
+        return text
+
+    def motion_text(self, letter, prompt_text=""):
+        """Motion prompt for a class letter. A class may define keyword
+        `overrides`: when the FLUX source prompt mentions e.g. a waterfall,
+        the calm-water class-C prompt actively freezes the falls (cfg=1 --
+        the positive prompt is the only steering), so a falls-specific
+        motion prompt is substituted instead."""
+        cls = self.classes[letter]
+        text = (prompt_text or "").lower()
+        if text:
+            for ov in cls.get("overrides", ()):
+                if any(re.search(r"\b" + re.escape(k.lower()), text)
+                       for k in ov.get("keywords", ())):
+                    return ov["motion"]
+        return cls["motion"]
 
     def state_path(self):
         os.makedirs(self.workspace, exist_ok=True)

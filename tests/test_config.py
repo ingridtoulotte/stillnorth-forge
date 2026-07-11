@@ -53,6 +53,54 @@ def test_motion_classes_complete():
         assert CFG.motion_text(letter) == CFG.classes[letter]["motion"]
 
 
+def test_motion_keyword_override():
+    """A class may reroute to a content-specific motion prompt when the FLUX
+    source prompt matches a keyword (e.g. waterfalls must not get the
+    calm-water class-C prompt — at cfg=1 it freezes the falls)."""
+    cls = CFG.classes["C"]
+    saved = cls.get("overrides")
+    cls["overrides"] = [{"keywords": ["waterfall", "cascade"],
+                         "motion": "FALLS-MOTION"}]
+    try:
+        assert CFG.motion_text("C", "cliffs with small waterfalls") == \
+            "FALLS-MOTION"
+        assert CFG.motion_text("C", "three cascades tumble") == "FALLS-MOTION"
+        assert CFG.motion_text("C", "a calm mirror lake") == cls["motion"]
+        assert CFG.motion_text("C") == cls["motion"]          # no text given
+        assert CFG.motion_text("A", "waterfall") == \
+            CFG.classes["A"]["motion"]                        # other classes untouched
+    finally:
+        if saved is None:
+            cls.pop("overrides", None)
+        else:
+            cls["overrides"] = saved
+
+
+def test_flux_suffix_augmentation():
+    """Falls-keyword sources get fast-shutter language appended to the FLUX
+    prompt (a long-exposure silky waterfall still gives Wan nothing to move)."""
+    saved = CFG.flux_suffixes
+    CFG.flux_suffixes = [{"keywords": ["waterfall"], "suffix": " SHUTTER"}]
+    try:
+        assert CFG.flux_text("cliffs with waterfalls") == \
+            "cliffs with waterfalls SHUTTER"
+        assert CFG.flux_text("a calm lake") == "a calm lake"
+        assert CFG.flux_text("") == ""
+    finally:
+        CFG.flux_suffixes = saved
+
+
+def test_live_falls_config_coherent():
+    """The shipped motion_prompts.json falls override + flux suffix must
+    stay keyword-aligned so both halves of the fix fire together."""
+    ov = CFG.classes["C"].get("overrides", [])
+    assert ov, "class C falls override missing"
+    assert CFG.flux_suffixes, "flux_suffixes missing"
+    assert set(ov[0]["keywords"]) == set(CFG.flux_suffixes[0]["keywords"])
+    assert "downward" in ov[0]["motion"]
+    assert "shutter" in CFG.flux_suffixes[0]["suffix"].lower()
+
+
 def test_poses_have_speeds():
     assert CFG.poses, "no poses configured"
     for p in CFG.poses:

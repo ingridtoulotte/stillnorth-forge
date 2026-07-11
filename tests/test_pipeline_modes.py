@@ -88,6 +88,7 @@ class TestActiveSet(PipelineFixture):
         self.pipe.mode = {"target": 1}
         self.pipe.letters["k1"] = "A"
         self.pipe.vid_judged["A_k1"] = True
+        touch(os.path.join(self.ws, STAGE_DIRS["final_up"], "A_k1.mp4"))
         active = self.pipe._pick_active()
         self.assertEqual(len(active), 0)   # target already satisfied
 
@@ -174,15 +175,33 @@ class TestAutoResumeKeepsMode(PipelineFixture):
         self.assertEqual(self.pipe.mode, {"target": 5})
 
 
+class TestAcceptedCountsOnlyExistingMasters(PipelineFixture):
+    def test_stale_accept_for_archived_master_not_counted(self):
+        """An accept whose master was manually archived/deleted must not
+        count toward the target — it once made target mode declare victory
+        without rendering a replacement."""
+        self.pipe.cfg.judge_enabled = True
+        self.pipe.cfg.judge_video_enabled = True
+        touch(os.path.join(self.ws, STAGE_DIRS["final_up"], "A_k1.mp4"))
+        self.pipe.vid_judged = {"A_k1": True, "A_gone": True}
+        with mock.patch("stillnorth.pipeline.lib.master_exists",
+                        return_value=False):
+            self.assertEqual(self.pipe.accepted_count(), 1)
+
+
 class TestModeStops(PipelineFixture):
     def test_target_reached(self):
         self.pipe.mode = {"target": 2}
         self.pipe.vid_judged = {"A_k1": True, "B_k2": True}
+        touch(os.path.join(self.ws, STAGE_DIRS["final_up"], "A_k1.mp4"))
+        touch(os.path.join(self.ws, STAGE_DIRS["final_up"], "B_k2.mp4"))
         self.assertTrue(self.pipe._target_reached())
 
     def test_target_counts_only_accepted(self):
         self.pipe.mode = {"target": 2}
         self.pipe.vid_judged = {"A_k1": True, "B_k2": False}
+        touch(os.path.join(self.ws, STAGE_DIRS["final_up"], "A_k1.mp4"))
+        touch(os.path.join(self.ws, STAGE_DIRS["final_up"], "B_k2.mp4"))
         self.assertFalse(self.pipe._target_reached())
 
     def test_time_up(self):
@@ -193,6 +212,61 @@ class TestModeStops(PipelineFixture):
     def test_time_not_up(self):
         self.pipe.mode = {"deadline": time.time() + 60}
         self.assertFalse(self.pipe._time_up())
+
+
+class TestSubmitRecovery(PipelineFixture):
+    """Timeout-storm fixes: a wait timeout must interrupt the job still
+    running server-side, retries must not resubmit a byte-identical graph
+    (ComfyUI cache-collapses it into a completed-but-empty history), and a
+    completed-but-orphaned output must be salvaged, not re-rendered."""
+
+    def _prep(self):
+        self.pipe.cfg.submit_retries = 1
+        self.pipe.cfg.retry_backoff = 0.0
+        self.pipe.cancel_flag = False
+
+    def test_timeout_interrupts_running_job(self):
+        self._prep()
+        self.pipe.comfy.queue = mock.Mock(return_value="pid1")
+        self.pipe.comfy.wait = mock.Mock(return_value=(False, "timeout"))
+        self.pipe.comfy.interrupt = mock.Mock()
+        ok, msg = self.pipe._submit({}, 1, "vid2")
+        self.assertFalse(ok)
+        self.assertEqual(self.pipe.comfy.interrupt.call_count, 2)
+
+    def test_retry_reseeds_graph(self):
+        self._prep()
+        g = {"71": {"inputs": {"noise_seed": 111}}}
+        seeds = []
+        self.pipe.comfy.queue = mock.Mock(
+            side_effect=lambda wf: seeds.append(
+                wf["71"]["inputs"]["noise_seed"]) or "pid")
+        self.pipe.comfy.wait = mock.Mock(return_value=(False, "no output"))
+        self.pipe.comfy.interrupt = mock.Mock()
+
+        def reseed(wf):
+            wf["71"]["inputs"]["noise_seed"] = 222
+
+        ok, _ = self.pipe._submit(g, 1, "vid2", reseed=reseed)
+        self.assertFalse(ok)
+        self.assertEqual(seeds, [111, 222])
+
+    def test_salvage_orphaned_completed_render(self):
+        d = os.path.join(self.ws, STAGE_DIRS["vid2"])
+        touch(os.path.join(d, "A_k1_00001_.mp4"))
+        with mock.patch.object(self.pipe, "_clip_nframes", return_value=97):
+            self.assertTrue(self.pipe._salvage_render("vid2", "A_k1", 97))
+        self.assertTrue(os.path.exists(os.path.join(d, "A_k1.mp4")))
+
+    def test_salvage_discards_short_clip(self):
+        d = os.path.join(self.ws, STAGE_DIRS["vid2"])
+        touch(os.path.join(d, "A_k2_00001_.mp4"))
+        with mock.patch.object(self.pipe, "_clip_nframes", return_value=40):
+            self.assertFalse(self.pipe._salvage_render("vid2", "A_k2", 97))
+        self.assertFalse(os.path.exists(os.path.join(d, "A_k2.mp4")))
+
+    def test_salvage_nothing_on_disk(self):
+        self.assertFalse(self.pipe._salvage_render("vid2", "A_k3", 97))
 
 
 class TestDeleteChain(PipelineFixture):
