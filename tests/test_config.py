@@ -53,6 +53,29 @@ def test_motion_classes_complete():
         assert CFG.motion_text(letter) == CFG.classes[letter]["motion"]
 
 
+def test_motion_keyword_override():
+    """A class may reroute to a content-specific motion prompt when the FLUX
+    source prompt matches a keyword (e.g. waterfalls must not get the
+    calm-water class-C prompt — at cfg=1 it freezes the falls)."""
+    cls = CFG.classes["C"]
+    saved = cls.get("overrides")
+    cls["overrides"] = [{"keywords": ["waterfall", "cascade"],
+                         "motion": "FALLS-MOTION"}]
+    try:
+        assert CFG.motion_text("C", "cliffs with small waterfalls") == \
+            "FALLS-MOTION"
+        assert CFG.motion_text("C", "three cascades tumble") == "FALLS-MOTION"
+        assert CFG.motion_text("C", "a calm mirror lake") == cls["motion"]
+        assert CFG.motion_text("C") == cls["motion"]          # no text given
+        assert CFG.motion_text("A", "waterfall") == \
+            CFG.classes["A"]["motion"]                        # other classes untouched
+    finally:
+        if saved is None:
+            cls.pop("overrides", None)
+        else:
+            cls["overrides"] = saved
+
+
 def test_poses_have_speeds():
     assert CFG.poses, "no poses configured"
     for p in CFG.poses:
