@@ -1,6 +1,15 @@
 {
   "_comment": "The CLIP classifier (stillnorth/classify.py, mirrored from tsn_classify.py) sorts each FLUX image by its CONTENT into A/B/C/D. Each content class is then animated with the Wan 2.2 motion prompt that physically fits that content. Edit the 'motion' strings freely -- they are sent verbatim to the Wan positive-prompt node. IMPORTANT (2026-07-09): the sampler runs at cfg=1 (4-step Seko distill) so the NEGATIVE prompt is ignored -- the positive prompt is the ONLY steering. Never ask for volumetrics in motion (drifting fog, falling snow, rolling clouds): Wan renders those as soft blurry blobs that spawn/dissolve mid-clip and compound over the continuation. Describe camera glide + stable weather + sharp detail instead.",
 
+  "_comment_falls": "2026-07-12 frozen-waterfall fix, two parts. (1) flux_suffixes: sources whose FLUX prompt mentions falling water get fast-shutter language appended -- FLUX's default long-exposure silky falls give Wan nothing to move (matched-seed A/B: silky falls stay frozen at ~0 px/frame regardless of motion prompt; a fast-shutter droplet-textured source unlocked +0.47 px/frame sustained downward flow). (2) classes.C.overrides: the same sources get a falls-specific motion prompt instead of the calm-water one, which at cfg=1 actively freezes falls.",
+
+  "flux_suffixes": [
+    {
+      "keywords": ["waterfall", "cascade", "rapids", "seepage", "torrent", "falls"],
+      "suffix": " Fast shutter speed: every waterfall is frozen in crisp detail, individual water droplets, streaks and white spray clearly visible and sharp -- absolutely no long-exposure silky smooth water effect."
+    }
+  ],
+
   "poses": ["Pan Up", "Pan Left", "Pan Right", "Zoom In", "Zoom Out"],
   "speed_by_pose": {
     "Pan Up": 0.2, "Pan Left": 0.4, "Pan Right": 0.4, "Zoom In": 0.2, "Zoom Out": 0.3
@@ -17,7 +26,13 @@
     },
     "C": {
       "content": "rivers, lakes and open liquid water with reflections",
-      "motion": "Smooth professional aerial drone footage gliding slowly over calm water with gentle parallax. Crisp, sharp, photorealistic, stable natural lighting, constant weather. The water moves gently -- a steady current with subtle surface ripples and soft reflections -- while the banks and treeline stay sharp and steady. No new mist forming, no haze thickening, nothing appears or disappears. High detail 4K nature documentary quality."
+      "motion": "Smooth professional aerial drone footage gliding slowly over calm water with gentle parallax. Crisp, sharp, photorealistic, stable natural lighting, constant weather. The water moves gently -- a steady current with subtle surface ripples and soft reflections -- while the banks and treeline stay sharp and steady. No new mist forming, no haze thickening, nothing appears or disappears. High detail 4K nature documentary quality.",
+      "overrides": [
+        {
+          "keywords": ["waterfall", "cascade", "rapids", "seepage", "torrent", "falls"],
+          "motion": "Smooth professional aerial drone footage gliding slowly with gentle parallax over cliffs with waterfalls. Every waterfall pours continuously downward at natural speed -- water visibly streams and falls down the rock face in one steady direction the whole time, white water churning steadily where it lands. The rocks, cliffs and vegetation stay crisp, sharp and steady; no new mist forming, no haze thickening, nothing appears or disappears, constant weather and lighting. High detail 4K nature documentary quality."
+        }
+      ]
     },
     "D": {
       "content": "glaciers, frozen lakes, arctic ice and snow-covered ground",

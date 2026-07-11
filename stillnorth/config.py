@@ -275,6 +275,7 @@ class Config:
         self.poses = self.motion["poses"]
         self.speed_by_pose = self.motion["speed_by_pose"]
         self.classes = self.motion["classes"]
+        self.flux_suffixes = self.motion.get("flux_suffixes", [])
 
         # long-video assembler (all optional, with safe defaults)
         a = self.raw.get("assembler", {})
@@ -309,6 +310,20 @@ class Config:
 
     def workflow_path(self, which):
         return os.path.join(ROOT, self.workflows[which]["file"])
+
+    def flux_text(self, prompt_text):
+        """FLUX prompt with any keyword-matched suffix appended. Waterfall
+        sources need fast-shutter/droplet language: FLUX's default
+        long-exposure silky falls give Wan nothing to move (matched-seed A/B:
+        falls stayed frozen at ~0 px/frame; a fast-shutter source unlocked
+        +0.47 px/frame sustained downward flow)."""
+        text = prompt_text or ""
+        low = text.lower()
+        for sf in self.flux_suffixes:
+            if any(re.search(r"\b" + re.escape(k.lower()), low)
+                   for k in sf.get("keywords", ())):
+                return text + sf["suffix"]
+        return text
 
     def motion_text(self, letter, prompt_text=""):
         """Motion prompt for a class letter. A class may define keyword

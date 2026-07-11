@@ -684,7 +684,7 @@ class Pipeline:
                 break
             self._working("flux", done + 1, len(todo))
             g = json.loads(json.dumps(base))
-            g[wf["node_text"]]["inputs"][wf["field_text"]] = text
+            g[wf["node_text"]]["inputs"][wf["field_text"]] = self.cfg.flux_text(text)
             g[wf["node_seed"]]["inputs"][wf["field_seed"]] = random.randint(0, 2**31 - 1)
             g[wf["node_save"]]["inputs"][wf["field_save"]] = self.cfg.comfy_prefix("flux", k)
             ok, msg = self._submit(g, self.cfg.timeout_img, "flux")
