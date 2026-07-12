@@ -108,6 +108,52 @@ class TestJudgeImage(unittest.TestCase):
         self.assertIn("melted", reason)
 
 
+class TestObstacleParsing(unittest.TestCase):
+    def test_move_block_none(self):
+        self.assertEqual(
+            judge._parse_obstacles("VANTAGE: AIR\nNONE\nMOVE-BLOCK: NONE"), [])
+
+    def test_move_block_subset(self):
+        self.assertEqual(
+            judge._parse_obstacles("a\nb\nMOVE-BLOCK: FORWARD, LEFT"),
+            ["FORWARD", "LEFT"])
+
+    def test_move_block_lowercase(self):
+        self.assertEqual(judge._parse_obstacles("x\ny\nmove-block: right"),
+                         ["RIGHT"])
+
+    def test_move_block_missing_is_empty(self):
+        self.assertEqual(judge._parse_obstacles("VANTAGE: AIR\nNONE"), [])
+
+    def test_move_block_ignores_unknown_tokens(self):
+        self.assertEqual(
+            judge._parse_obstacles("a\nb\nMOVE-BLOCK: DOWN, BACKWARD"), [])
+
+
+class TestJudgeImageEx(unittest.TestCase):
+    def test_returns_blocked_dirs(self):
+        reply = "VANTAGE: AIR\nNONE\nMOVE-BLOCK: FORWARD"
+        with mock.patch.object(judge, "_chat", return_value=reply), \
+             mock.patch.object(judge, "_b64_image", return_value="x"):
+            ok, reason, blocked = judge.judge_image_ex(FakeCfg(), "img.png")
+        self.assertTrue(ok)
+        self.assertEqual(blocked, ["FORWARD"])
+
+    def test_ollama_error_blocks_nothing(self):
+        with mock.patch.object(judge, "_chat", side_effect=OSError("boom")), \
+             mock.patch.object(judge, "_b64_image", return_value="x"):
+            ok, reason, blocked = judge.judge_image_ex(FakeCfg(), "img.png")
+        self.assertTrue(ok)
+        self.assertEqual(blocked, [])
+
+    def test_judge_image_still_two_tuple(self):
+        reply = "VANTAGE: AIR\nNONE\nMOVE-BLOCK: NONE"
+        with mock.patch.object(judge, "_chat", return_value=reply), \
+             mock.patch.object(judge, "_b64_image", return_value="x"):
+            result = judge.judge_image(FakeCfg(), "img.png")
+        self.assertEqual(len(result), 2)
+
+
 class TestJudgeVideo(unittest.TestCase):
     def test_sampling_failure_passes_unjudged(self):
         with mock.patch.object(judge, "sample_frames", return_value=[]):

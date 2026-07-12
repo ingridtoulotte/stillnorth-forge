@@ -172,7 +172,9 @@ class TestAutoResumeKeepsMode(PipelineFixture):
     def test_explicit_start_still_sets_mode(self):
         with mock.patch.object(self.pipe, "_run"):
             self.pipe.start(target=5)
-        self.assertEqual(self.pipe.mode, {"target": 5})
+        # start() now also snapshots a baseline (0 with an empty catalog) so
+        # target counts NEW masters, not the raw total.
+        self.assertEqual(self.pipe.mode, {"target": 5, "baseline": 0})
 
 
 class TestAcceptedCountsOnlyExistingMasters(PipelineFixture):
@@ -212,6 +214,45 @@ class TestModeStops(PipelineFixture):
     def test_time_not_up(self):
         self.pipe.mode = {"deadline": time.time() + 60}
         self.assertFalse(self.pipe._time_up())
+
+
+class TestTargetIsIncremental(PipelineFixture):
+    """target=N means 'N MORE masters', not the raw catalog total. With 3
+    already accepted, target=2 must render exactly 2 new ones, not declare
+    instant victory (user: 'the number isn't the total, it's how many MORE
+    I want')."""
+    def setUp(self):
+        super().setUp()
+        self.pipe.cfg.judge_enabled = True
+        self.pipe.cfg.judge_video_enabled = True
+
+    def _accept(self, stem):
+        self.pipe.vid_judged[stem] = True
+        touch(os.path.join(self.ws, STAGE_DIRS["final_up"], stem + ".mp4"))
+
+    def test_baseline_captured_at_start(self):
+        for s in ("A_a", "A_b", "A_c"):
+            self._accept(s)
+        with mock.patch.object(self.pipe, "_run"):
+            self.pipe.start(target=2)
+        self.assertEqual(self.pipe.mode["baseline"], 3)
+
+    def test_pre_existing_masters_do_not_satisfy_target(self):
+        for s in ("A_a", "A_b", "A_c"):
+            self._accept(s)
+        self.pipe.mode = {"target": 2, "baseline": self.pipe.accepted_count()}
+        self.assertFalse(self.pipe._target_reached())        # 0 new yet
+        self.add_prompts(["k4", "k5", "k6"])
+        self.assertEqual(len(self.pipe._pick_active()), 2)   # wants exactly 2 new
+
+    def test_reaches_target_after_n_new(self):
+        for s in ("A_a", "A_b", "A_c"):
+            self._accept(s)
+        self.pipe.mode = {"target": 2, "baseline": self.pipe.accepted_count()}
+        self._accept("A_new1")
+        self.assertFalse(self.pipe._target_reached())        # 1 new < 2
+        self._accept("A_new2")
+        self.assertTrue(self.pipe._target_reached())         # 2 new -> done
 
 
 class TestSubmitRecovery(PipelineFixture):
@@ -308,12 +349,14 @@ class TestDeleteChain(PipelineFixture):
 class TestStatePersistence(PipelineFixture):
     def test_judge_state_roundtrip(self):
         self.pipe.judged = {"k1": True}
+        self.pipe.judged_gate = {"k1": 2}
         self.pipe.img_rejects = {"k2": 1}
         self.pipe.vid_judged = {"A_k1": True}
         self.pipe.vid_rejects = {"k3": 2}
         self.pipe.abandoned = ["k3"]
         self.pipe.html_seen = {"a.html": 123}
         self.pipe.mode = {"target": 5}
+        self.pipe.posehints = {"k1": ["FORWARD"]}
         self.pipe._save_state()
         with mock.patch("stillnorth.pipeline.get_config",
                         return_value=self.cfg), \
@@ -321,11 +364,64 @@ class TestStatePersistence(PipelineFixture):
             from stillnorth.pipeline import Pipeline
             p2 = Pipeline()
         self.assertEqual(p2.judged, {"k1": True})
+        self.assertEqual(p2.judged_gate, {"k1": 2})
         self.assertEqual(p2.img_rejects, {"k2": 1})
         self.assertEqual(p2.vid_judged, {"A_k1": True})
         self.assertEqual(p2.abandoned, ["k3"])
         self.assertEqual(p2.html_seen, {"a.html": 123})
         self.assertEqual(p2.mode, {"target": 5})
+        self.assertEqual(p2.posehints, {"k1": ["FORWARD"]})
+
+
+class TestRegateStaleStills(PipelineFixture):
+    """A still accepted under an OLDER CV gate version must be re-checked on
+    resume — never grandfathered past a gate added after it was first judged
+    (the bug that shipped dense-micro-texture "240p mush" masters whose
+    pre-struct_ratio-gate accepts were never re-evaluated)."""
+
+    def _flux(self, k):
+        p = os.path.join(self.ws, STAGE_DIRS["flux"], k + ".png")
+        touch(p)
+        return p
+
+    def _src_dir(self):
+        return self.cfg.stage_dir("flux", ensure=False)
+
+    def test_stale_fail_drops_chain(self):
+        self.pipe.letters["k1"] = "A"
+        self.pipe.judged["k1"] = True          # no judged_gate -> version 0
+        p = self._flux("k1")
+        with mock.patch("stillnorth.pipeline.judgemod.cv_gate",
+                        return_value=(False, "mush")):
+            self.pipe._regate_stale_stills(self._src_dir())
+        self.assertNotIn("k1", self.pipe.judged)
+        self.assertFalse(os.path.exists(p))
+
+    def test_stale_pass_stamps_version(self):
+        from stillnorth.judge import CV_GATE_VERSION
+        self.pipe.judged["k1"] = True
+        self._flux("k1")
+        with mock.patch("stillnorth.pipeline.judgemod.cv_gate",
+                        return_value=(True, "")):
+            self.pipe._regate_stale_stills(self._src_dir())
+        self.assertTrue(self.pipe.judged.get("k1"))
+        self.assertEqual(self.pipe.judged_gate.get("k1"), CV_GATE_VERSION)
+
+    def test_current_version_not_rechecked(self):
+        from stillnorth.judge import CV_GATE_VERSION
+        self.pipe.judged["k1"] = True
+        self.pipe.judged_gate["k1"] = CV_GATE_VERSION
+        self._flux("k1")
+        with mock.patch("stillnorth.pipeline.judgemod.cv_gate") as g:
+            self.pipe._regate_stale_stills(self._src_dir())
+            g.assert_not_called()
+
+    def test_missing_png_skipped(self):
+        self.pipe.judged["k1"] = True          # stale, but no still on disk
+        with mock.patch("stillnorth.pipeline.judgemod.cv_gate") as g:
+            self.pipe._regate_stale_stills(self._src_dir())
+            g.assert_not_called()
+        self.assertTrue(self.pipe.judged.get("k1"))
 
 
 class TestHtmlAutoload(PipelineFixture):
@@ -341,6 +437,21 @@ class TestHtmlAutoload(PipelineFixture):
             # second scan: same mtime -> not re-ingested
             self.pipe._scan_html_dir()
             ing.assert_called_once()
+
+    def test_scan_ingests_txt_and_json(self):
+        """Plain .txt / .json holding a {"scene": ...} object is ingested too,
+        not only .html — the drop folder is format-agnostic (real parser)."""
+        d = self.cfg.html_dir
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "hand.txt"), "w", encoding="utf-8") as fh:
+            fh.write('{"scene": "a lone pine on a snowy ridge", "title": "pine"}')
+        with open(os.path.join(d, "batch.json"), "w", encoding="utf-8") as fh:
+            fh.write('[{"scene": "a frozen lake at dawn", "title": "lake"}]')
+        self.pipe._scan_html_dir()
+        titles = {v.get("title") for v in self.pipe.prompts.values()}
+        self.assertIn("pine", titles)
+        self.assertIn("lake", titles)
+        self.assertEqual(len(self.pipe.prompts), 2)
 
 
 if __name__ == "__main__":
