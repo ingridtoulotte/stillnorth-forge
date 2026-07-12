@@ -130,24 +130,75 @@ class TestObstacleParsing(unittest.TestCase):
             judge._parse_obstacles("a\nb\nMOVE-BLOCK: DOWN, BACKWARD"), [])
 
 
+class TestMotionParsing(unittest.TestCase):
+    def test_extracts_clean_clause(self):
+        reply = ("VANTAGE: AIR\nNONE\nMOVE-BLOCK: NONE\n"
+                 "MOTION: gliding forward over the spruce ridge toward the "
+                 "frozen river bend, treeline staying razor sharp")
+        self.assertIn("spruce ridge", judge._parse_motion(reply))
+
+    def test_none_is_empty(self):
+        self.assertEqual(
+            judge._parse_motion("a\nb\nc\nMOTION: NONE"), "")
+
+    def test_missing_line_is_empty(self):
+        self.assertEqual(
+            judge._parse_motion("VANTAGE: AIR\nNONE\nMOVE-BLOCK: NONE"), "")
+
+    def test_volumetric_clause_rejected(self):
+        # the load-bearing guardrail: a clause requesting volumetrics must be
+        # dropped (-> class default) so cfg=1 never gets blob-spawning language
+        for bad in ("drifting fog rolls over the valley",
+                    "clouds swirl above the peak",
+                    "snowfall streaks past the lens",
+                    "mist thickens over the lake"):
+            self.assertEqual(
+                judge._parse_motion("a\nb\nc\nMOTION: " + bad), "",
+                f"should reject: {bad}")
+
+    def test_morphological_variants_rejected(self):
+        # -y / -s / -ing forms of volumetrics must also be caught (the VLM
+        # slipped "misty horizon" past the bare-noun denylist)
+        for bad in ("misty horizon line", "over a foggy valley",
+                    "snowy squalls sweep in", "cloudy ridge tops",
+                    "hazy far shore"):
+            self.assertEqual(
+                judge._parse_motion("a\nb\nc\nMOTION: " + bad), "",
+                f"should reject: {bad}")
+
+    def test_solid_feature_words_allowed(self):
+        # terrain/landform/winding/formation must NOT trip the denylist
+        clause = ("panning left across winding terrain and rock formations "
+                  "along the shoreline")
+        self.assertEqual(judge._parse_motion("a\nb\nc\nMOTION: " + clause),
+                         clause)
+
+    def test_overlong_clause_rejected(self):
+        self.assertEqual(
+            judge._parse_motion("a\nb\nc\nMOTION: " + "ridge " * 60), "")
+
+
 class TestJudgeImageEx(unittest.TestCase):
-    def test_returns_blocked_dirs(self):
-        reply = "VANTAGE: AIR\nNONE\nMOVE-BLOCK: FORWARD"
+    def test_returns_blocked_and_motion(self):
+        reply = ("VANTAGE: AIR\nNONE\nMOVE-BLOCK: FORWARD\n"
+                 "MOTION: panning left along the granite ridge")
         with mock.patch.object(judge, "_chat", return_value=reply), \
              mock.patch.object(judge, "_b64_image", return_value="x"):
-            ok, reason, blocked = judge.judge_image_ex(FakeCfg(), "img.png")
+            ok, reason, blocked, motion = judge.judge_image_ex(FakeCfg(), "img.png")
         self.assertTrue(ok)
         self.assertEqual(blocked, ["FORWARD"])
+        self.assertIn("granite ridge", motion)
 
     def test_ollama_error_blocks_nothing(self):
         with mock.patch.object(judge, "_chat", side_effect=OSError("boom")), \
              mock.patch.object(judge, "_b64_image", return_value="x"):
-            ok, reason, blocked = judge.judge_image_ex(FakeCfg(), "img.png")
+            ok, reason, blocked, motion = judge.judge_image_ex(FakeCfg(), "img.png")
         self.assertTrue(ok)
         self.assertEqual(blocked, [])
+        self.assertEqual(motion, "")
 
     def test_judge_image_still_two_tuple(self):
-        reply = "VANTAGE: AIR\nNONE\nMOVE-BLOCK: NONE"
+        reply = "VANTAGE: AIR\nNONE\nMOVE-BLOCK: NONE\nMOTION: NONE"
         with mock.patch.object(judge, "_chat", return_value=reply), \
              mock.patch.object(judge, "_b64_image", return_value="x"):
             result = judge.judge_image(FakeCfg(), "img.png")

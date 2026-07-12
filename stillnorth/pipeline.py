@@ -71,6 +71,7 @@ class Pipeline:
         self.letters = {}    # key -> "A".."D"
         self.posemap = {}    # stem(<letter>_<key>) -> {letter, pose, speed}
         self.posehints = {}  # key -> [blocked glide dirs from image judge]
+        self.motionhints = {}  # key -> bespoke Wan motion clause from image judge
         self.metrics = {}    # stage -> {n, fail, t, min, max}  (per-stage timing)
         self.desired_running = False  # crash-safe intent: auto-resume on launch
         # AI-judge bookkeeping (all persisted)
@@ -103,6 +104,7 @@ class Pipeline:
                 self.letters = d.get("letters", {})
                 self.posemap = d.get("posemap", {})
                 self.posehints = d.get("posehints", {})
+                self.motionhints = d.get("motionhints", {})
                 self.metrics = d.get("metrics", {})
                 self.desired_running = bool(d.get("desired_running", False))
                 self.judged = d.get("judged", {})
@@ -124,6 +126,7 @@ class Pipeline:
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({"prompts": self.prompts, "letters": self.letters,
                        "posemap": self.posemap, "posehints": self.posehints,
+                       "motionhints": self.motionhints,
                        "metrics": self.metrics,
                        "desired_running": self.desired_running,
                        "judged": self.judged, "judged_gate": self.judged_gate,
@@ -415,6 +418,7 @@ class Pipeline:
             self.letters = {}
             self.posemap = {}
             self.posehints = {}
+            self.motionhints = {}
             self.judged = {}
             self.judged_gate = {}
             self.img_rejects = {}
@@ -451,6 +455,7 @@ class Pipeline:
             self.letters = {}
             self.posemap = {}
             self.posehints = {}
+            self.motionhints = {}
             self.metrics = {}
             self.judged = {}
             self.judged_gate = {}
@@ -758,14 +763,17 @@ class Pipeline:
                 break
             self._working("judge_flux", done + 1, len(todo))
             path = os.path.join(src_dir, k + ".png")
-            ok, reason, blocked = judgemod.judge_image_ex(self.cfg, path)
+            ok, reason, blocked, motion = judgemod.judge_image_ex(self.cfg, path)
             with self.lock:
                 if ok:
                     self.judged[k] = True
                     self.judged_gate[k] = judgemod.CV_GATE_VERSION
                     # remember which glide directions the judge ruled out so
-                    # the camera stage never dollies/pans into a near mass
+                    # the camera stage never dollies/pans into a near mass,
+                    # plus the bespoke per-image motion clause it wrote (''
+                    # when denylisted/absent -> class default is used)
                     self.posehints[k] = blocked
+                    self.motionhints[k] = motion
                 else:
                     n = self.img_rejects.get(k, 0) + 1
                     self.img_rejects[k] = n
@@ -822,6 +830,7 @@ class Pipeline:
         self.vid_judged.pop(stem, None)
         self.posemap.pop(stem, None)
         self.posehints.pop(key, None)
+        self.motionhints.pop(key, None)
         if flux_too:
             self.letters.pop(key, None)
 
@@ -1152,7 +1161,8 @@ class Pipeline:
             else:
                 self._log(f"vid2 seed-restore failed {stem} — raw tail used")
                 restored = None
-        src_text = self.prompts.get(stem.split("_", 1)[-1], {}).get("text", "")
+        ckey = stem.split("_", 1)[-1]
+        src_text = self.prompts.get(ckey, {}).get("text", "")
         g["200"] = {"class_type": "VHS_LoadVideoPath",
                     "_meta": {"title": "clip1 tail"},
                     "inputs": {"video": seed_path, "force_rate": 0.0,
@@ -1162,7 +1172,8 @@ class Pipeline:
                                "select_every_nth": 1}}
         g[wf["node_wci2v"]]["inputs"][wf["field_start_image"]] = ["200", 0]
         g[wf["node_text"]]["inputs"][wf["field_text"]] = \
-            self.cfg.motion_text(letter, src_text)
+            self.cfg.motion_text(letter, src_text,
+                                 custom=self.motionhints.get(ckey, ""))
         if wf.get("node_length"):
             g[wf["node_length"]]["inputs"][wf["field_length"]] = \
                 int(self.cfg.continuation_length)
@@ -1313,9 +1324,11 @@ class Pipeline:
             return False
         g = json.loads(json.dumps(base))
         self._apply_render_res(g, wf)
+        key = stem.split("_", 1)[-1]
         g[wf["node_image"]]["inputs"][wf["field_image"]] = stem + ".png"
         g[wf["node_text"]]["inputs"][wf["field_text"]] = self.cfg.motion_text(
-            letter, self.prompts.get(stem.split("_", 1)[-1], {}).get("text", ""))
+            letter, self.prompts.get(key, {}).get("text", ""),
+            custom=self.motionhints.get(key, ""))
         g[wf["node_camera"]]["inputs"][wf["field_pose"]] = pose
         g[wf["node_camera"]]["inputs"][wf["field_speed"]] = speed
         if length and wf.get("node_length"):

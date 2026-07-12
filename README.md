@@ -56,7 +56,7 @@ All four are broad, realistic and loopable so a single prompt fits every image i
 
 1. **Per-frame contrast de-drift** (`contrast_flatten`, default on) — Wan drifts toward higher contrast/saturation over a continuation (a "neon" end). The finisher corrects against the **smoothed measured curve** of per-frame luma-std + saturation (not a linear fit — Wan's drift rises then eases, and a straight line left +10 % saturation swing in real masters) so the drift is removed while each frame keeps its natural variation. Target = clip 1's level × `contrast_target_boost` / `saturation_target_boost`.
 1b. **Detail hold** (`detail_hold`, default on) — Wan progressively melts high-frequency texture over a clip (~-15 % Laplacian variance at 720p, which super-res amplifies to ~-30 % perceived at 4K — trees turn painterly). Before super-res, late frames get an adaptive unsharp that holds the clip's fine-detail level at its own early-window baseline (`detail_hold_max` caps the gain). Pairs with **`seed_restore`** (default on): the continuation is seeded with a detail-restored copy of clip 1's tail instead of the raw (already melted) frames — Wan carries its seed's detail level through the whole continuation, measured **+60 % sharper continuation** on matched-seed A/B at zero extra render time.
-2. **Real-ESRGAN** per-frame super-res via Upscayl (`esrgan_model: upscayl-standard-4x` — `ultramix-balanced-4x` fabricates a wire-mesh texture on open meadows, `remacri-4x` goes neon), then scale to **UHD `final_height` (2160)** + crisp unsharp + light grain + a gentle final grade (`final_grade`, default `eq=contrast=0.93:gamma=1.04:saturation=0.97` — eases the FLUX-inherited punchy tone; `""` = off). The upscaler can't invent detail past the generation res, which is why `wan_width`/`wan_height` default to **1280×720**: 720p base × 4 = exact 3840×2160 and measured **+47–92 % sharper 2160p masters** vs the old 1104×624 (at ~+65 % render time). Drop back to 1104×624 for faster drafts.
+2. **Real-ESRGAN** per-frame super-res via Upscayl (`esrgan_model: high-fidelity-4x` — `ultramix-balanced-4x` fabricates a wire-mesh texture on open meadows and `remacri-4x` fabricates a chain-mail / vein mesh on dense conifer and moss; `high-fidelity-4x` stays clean across every tested content type), then scale to **UHD `final_height` (2160)** + crisp unsharp + light grain + a gentle final grade (`final_grade`, default `eq=contrast=0.93:gamma=1.04:saturation=0.97` — eases the FLUX-inherited punchy tone; `""` = off). The upscaler can't invent detail past the generation res, which is why `wan_width`/`wan_height` default to **1280×720**: 720p base × 4 = exact 3840×2160 and measured **+47–92 % sharper 2160p masters** vs the old 1104×624 (at ~+65 % render time). Drop back to 1104×624 for faster drafts.
 
 Set `final_upscaler: lanczos` to fall back to the cheap ffmpeg chain on a box without the Upscayl binary. `continuation_mode: single_frame` restores the old single-still continuation (`clip2_color_match`, `trim_start_frames`, `clip2_sharpen` apply only in that mode).
 
@@ -166,22 +166,26 @@ noted in the log. Tune it in the `judge` block of `config/config.json`
 
 ## 🎯 Run modes
 
-- **vids wanted (N)** — the run keeps regenerating (replacing judge-rejected
-  images and remaking reviewed vids) until exactly **N accepted masters**
-  sit in the output, then stops. Only the needed number of chains is in
-  flight at once, most-advanced first.
+- **vids wanted (N)** — **N _more_** accepted masters, not N total. The run
+  snapshots how many masters already sit in the catalog when you press Run,
+  then keeps regenerating (replacing judge-rejected images and remaking
+  reviewed vids) until **N new** ones are added on top of that baseline, then
+  stops — the status line reads `X / N new · M in catalog`. Only the needed
+  number of chains is in flight at once, most-advanced first.
 - **time budget (minutes)** — produce as many accepted masters as possible
   in the window, then stop (the item being rendered is finished, not
   killed). Chains run in small waves so clips actually complete instead of
   the whole prompt set camping in the FLUX stage.
 - **neither** — classic behaviour: process every queued prompt.
 
-## 📥 HTML auto-load
+## 📥 Prompt-folder auto-load
 
-Drop your prompt `.html` files into **`<workspace>/00_html_prompts/`** —
-the worker scans the folder on every pass (new or edited files, tracked by
-mtime) and ingests them automatically. No UI upload needed; the drag-drop
-zone still works too.
+Drop your prompt files into **`<workspace>/00_html_prompts/`** — the worker
+scans the folder on every pass (new or edited files, tracked by mtime) and
+ingests them automatically. It reads the FLUX.2 generator **`.html`** exports
+and also plain **`.txt`** / **`.json`** files holding one or more balanced
+`{"scene": "..."}` objects, so you can hand-write prompts without the
+generator. No UI upload needed; the drag-drop zone still works too.
 
 ## The UI
 

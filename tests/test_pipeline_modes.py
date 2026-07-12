@@ -357,6 +357,7 @@ class TestStatePersistence(PipelineFixture):
         self.pipe.html_seen = {"a.html": 123}
         self.pipe.mode = {"target": 5}
         self.pipe.posehints = {"k1": ["FORWARD"]}
+        self.pipe.motionhints = {"k1": "gliding over the ridge"}
         self.pipe._save_state()
         with mock.patch("stillnorth.pipeline.get_config",
                         return_value=self.cfg), \
@@ -371,6 +372,7 @@ class TestStatePersistence(PipelineFixture):
         self.assertEqual(p2.html_seen, {"a.html": 123})
         self.assertEqual(p2.mode, {"target": 5})
         self.assertEqual(p2.posehints, {"k1": ["FORWARD"]})
+        self.assertEqual(p2.motionhints, {"k1": "gliding over the ridge"})
 
 
 class TestRegateStaleStills(PipelineFixture):
