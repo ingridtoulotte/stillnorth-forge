@@ -71,7 +71,7 @@ async function runPipeline() {
   const target = parseInt($("mode-target").value, 10) || null;
   const minutes = target ? null : (parseFloat($("mode-minutes").value) || null);
   const r = await api("/api/run", { target, minutes });
-  const mode = target ? `until ${target} accepted vids` : minutes ? `for ${minutes} min` : "full set";
+  const mode = target ? `until ${target} more accepted vids` : minutes ? `for ${minutes} min` : "full set";
   toast(r.started ? `pipeline running — ${mode}` : "already running");
   refresh();
 }
@@ -186,7 +186,7 @@ async function refresh() {
   // mode / judge status line
   const md = s.mode || {};
   let mtxt = "";
-  if (md.kind === "target") mtxt = `🎯 ${md.accepted ?? 0} / ${md.target} accepted`;
+  if (md.kind === "target") mtxt = `🎯 ${md.accepted_new ?? 0} / ${md.target} new · ${md.accepted ?? 0} in catalog`;
   else if (md.kind === "time" && s.running) mtxt = `⏲ ${fmtDur(md.seconds_left ?? 0)} left · ${md.accepted ?? 0} accepted`;
   if (md.review) mtxt += `${mtxt ? " · " : ""}⚠ ${md.review} in review`;
   if (md.judge === false) mtxt += `${mtxt ? " · " : ""}judge off`;

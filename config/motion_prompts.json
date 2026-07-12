@@ -15,6 +15,15 @@
     "Pan Up": 0.2, "Pan Left": 0.4, "Pan Right": 0.4, "Zoom In": 0.2, "Zoom Out": 0.3
   },
 
+  "_comment_camera": "2026-07-12 scene-aware camera. Poses are picked by WEIGHTED group, not uniform random: ~50% {up, dolly-back} vs 50% {dolly-forward, left, right}. On WanCameraEmbedding, Zoom In = T[0,0,+2] (dolly FORWARD into the scene) and Zoom Out = T[0,0,-2] (dolly BACK) -- true translations, not focal zoom -- so the existing five poses already span every translation axis; no new pose or workflow change is needed. Left/right keep matched speed (0.4). pose_block_map maps the image judge's Line-3 MOVE-BLOCK directions onto the poses they forbid, so the camera never dollies/pans straight into a near cliff wall or tree mass.",
+  "pose_groups": {
+    "up_back":  {"weight": 0.5, "poses": ["Pan Up", "Zoom Out"]},
+    "fwd_side": {"weight": 0.5, "poses": ["Zoom In", "Pan Left", "Pan Right"]}
+  },
+  "pose_block_map": {
+    "FORWARD": ["Zoom In"], "LEFT": ["Pan Left"], "RIGHT": ["Pan Right"], "UP": ["Pan Up"]
+  },
+
   "classes": {
     "A": {
       "content": "aerial forest canopy / snowy plains (land only, no open water)",

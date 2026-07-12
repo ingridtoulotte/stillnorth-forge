@@ -34,7 +34,7 @@ import urllib.request
 # IMPOSSIBLE rejects, and natural repetition is explicitly ruled out
 # (uniform ripples/mist were the dominant false-positive source).
 IMAGE_PROMPT = (
-    "Look at this nature photograph and answer in exactly two lines.\n"
+    "Look at this nature photograph and answer in exactly three lines.\n"
     "Line 1 — from WHERE was the camera when this was taken? Reply exactly "
     "one of:\n"
     "VANTAGE: AIR — camera clearly airborne (drone/helicopter), high above "
@@ -55,8 +55,15 @@ IMAGE_PROMPT = (
     "floating disconnected fragments, text overlays, half-formed animals "
     "or structures, and distinct vertical COLUMNS of steam or smoke rising "
     "from the ground like geysers or chimneys where nothing could produce "
-    "them (horizontal fog banks and valley mist are fine and normal). "
-    "Two lines only."
+    "them (horizontal fog banks and valley mist are fine and normal).\n"
+    "Line 3 — imagine this is the first frame of a slow aerial drone shot and "
+    "the drone could glide FORWARD (deeper into the scene), LEFT, RIGHT or UP. "
+    "Name only the direction(s) that would immediately push it into a large "
+    "solid mass right at that edge of the frame — a cliff wall, rock face, "
+    "ridge or dense wall of trees filling the foreground or one whole side. "
+    "If the view is open in every direction, reply exactly: MOVE-BLOCK: NONE. "
+    "Otherwise reply: MOVE-BLOCK: <FORWARD/LEFT/RIGHT/UP, comma-separated>.\n"
+    "Three lines only."
 )
 
 VIDEO_PROMPT = (
@@ -141,6 +148,25 @@ def _parse_verdict(text):
     if "VANTAGE: GROUND" in up or first.startswith("VANTAGE: GROUND"):
         return False, ("off-brief: " + t.replace("\n", " "))[:160]
     return True, t.replace("\n", " ")[:160]
+
+
+# camera-glide directions the WanCameraEmbedding vocabulary can move
+_MOVE_DIRS = ("FORWARD", "LEFT", "RIGHT", "UP")
+
+
+def _parse_obstacles(text):
+    """Directions the drone should NOT glide because a large near mass fills
+    that side (the VLM's Line-3 MOVE-BLOCK answer). Subset of _MOVE_DIRS.
+    Best-effort: no MOVE-BLOCK line, or 'NONE', returns [] (camera picks
+    freely) — a missing/garbled obstacle answer must never block a render."""
+    for line in (text or "").splitlines():
+        u = line.strip().upper()
+        if u.startswith("MOVE-BLOCK:") or u.startswith("MOVE BLOCK:"):
+            rest = u.split(":", 1)[1]
+            if "NONE" in rest:
+                return []
+            return [d for d in _MOVE_DIRS if d in rest]
+    return []
 
 
 def available(cfg):
@@ -259,14 +285,26 @@ def judge_image(cfg, path):
     Gate 2 is the VLM plausibility check. Errors talking to Ollama do NOT
     reject work (the batch must survive a stopped Ollama): they pass with a
     logged reason instead."""
+    ok, reason, _ = judge_image_ex(cfg, path)
+    return ok, reason
+
+
+def judge_image_ex(cfg, path):
+    """Like judge_image but ALSO returns the VLM's move-block directions —
+    which way a near foreground mass rules out gliding (Line-3 MOVE-BLOCK).
+    Same single VLM call, additive parse: the camera stage reads these to
+    avoid panning/dollying straight into a wall. Returns (ok, reason,
+    blocked_dirs). CV-gate failure or an Ollama error returns []."""
     ok, reason = cv_gate(cfg, path)
     if not ok:
-        return False, reason
+        return False, reason, []
     try:
-        ok, reason = _parse_verdict(_chat(cfg, IMAGE_PROMPT, [_b64_image(path)]))
-        return ok, reason
+        text = _chat(cfg, IMAGE_PROMPT, [_b64_image(path)])
+        ok, reason = _parse_verdict(text)
+        return ok, reason, _parse_obstacles(text)
     except Exception as e:
-        return True, f"judge unavailable ({e.__class__.__name__}) — passed unjudged"
+        return (True, f"judge unavailable ({e.__class__.__name__}) — passed "
+                "unjudged", [])
 
 
 def _duration(cfg, path):

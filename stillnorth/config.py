@@ -276,6 +276,20 @@ class Config:
         self.speed_by_pose = self.motion["speed_by_pose"]
         self.classes = self.motion["classes"]
         self.flux_suffixes = self.motion.get("flux_suffixes", [])
+        # Scene-aware camera (2026-07-12): weight direction groups instead of
+        # picking uniformly, and drop directions the image judge flagged as
+        # blocked by a near foreground mass. Zoom In/Out are true Z-axis
+        # translations on WanCameraEmbedding (= dolly forward/back), so the
+        # existing 5 poses already span all translation axes.
+        self.pose_groups = self.motion.get("pose_groups", {
+            "up_back": {"weight": 0.5, "poses": ["Pan Up", "Zoom Out"]},
+            "fwd_side": {"weight": 0.5,
+                         "poses": ["Zoom In", "Pan Left", "Pan Right"]},
+        })
+        self.pose_block_map = self.motion.get("pose_block_map", {
+            "FORWARD": ["Zoom In"], "LEFT": ["Pan Left"],
+            "RIGHT": ["Pan Right"], "UP": ["Pan Up"],
+        })
 
         # long-video assembler (all optional, with safe defaults)
         a = self.raw.get("assembler", {})
@@ -339,6 +353,39 @@ class Config:
                        for k in ov.get("keywords", ())):
                     return ov["motion"]
         return cls["motion"]
+
+    def choose_pose(self, blocked=(), rng=None):
+        """Pick a camera pose. Weighted ~50% {up, dolly-back} vs 50% {dolly-
+        forward, left, right} instead of uniform-random over all five, and
+        exclude any direction the image judge flagged as blocked by a near
+        foreground mass (`blocked` = judge MOVE-BLOCK dirs, e.g. ['FORWARD']).
+        Zoom In/Out are Z-translations = dolly forward/back. Returns
+        (pose, speed). Falls back gracefully if a whole group is blocked, and
+        to Static only if literally every direction is ruled out."""
+        import random as _random
+        rng = rng or _random
+        bad = set()
+        for d in (blocked or ()):
+            bad.update(self.pose_block_map.get(str(d).upper(), ()))
+        avail = {name: [p for p in g.get("poses", ())
+                        if p not in bad and p in self.speed_by_pose]
+                 for name, g in self.pose_groups.items()}
+        active = [(name, float(self.pose_groups[name].get("weight", 1.0)))
+                  for name in avail if avail[name]]
+        if active:
+            total = sum(w for _, w in active) or 1.0
+            r = rng.random() * total
+            acc, chosen = 0.0, active[-1][0]
+            for name, w in active:
+                acc += w
+                if r <= acc:
+                    chosen = name
+                    break
+            pose = rng.choice(avail[chosen])
+        else:
+            allowed = [p for p in self.poses if p not in bad]
+            pose = rng.choice(allowed) if allowed else "Static"
+        return pose, self.speed_by_pose.get(pose, 0.3)
 
     def state_path(self):
         os.makedirs(self.workspace, exist_ok=True)

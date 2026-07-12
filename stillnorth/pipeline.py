@@ -70,6 +70,7 @@ class Pipeline:
         self.prompts = {}    # key -> {text, src, title}
         self.letters = {}    # key -> "A".."D"
         self.posemap = {}    # stem(<letter>_<key>) -> {letter, pose, speed}
+        self.posehints = {}  # key -> [blocked glide dirs from image judge]
         self.metrics = {}    # stage -> {n, fail, t, min, max}  (per-stage timing)
         self.desired_running = False  # crash-safe intent: auto-resume on launch
         # AI-judge bookkeeping (all persisted)
@@ -101,6 +102,7 @@ class Pipeline:
                 self.prompts = d.get("prompts", {})
                 self.letters = d.get("letters", {})
                 self.posemap = d.get("posemap", {})
+                self.posehints = d.get("posehints", {})
                 self.metrics = d.get("metrics", {})
                 self.desired_running = bool(d.get("desired_running", False))
                 self.judged = d.get("judged", {})
@@ -121,7 +123,8 @@ class Pipeline:
         tmp = p + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({"prompts": self.prompts, "letters": self.letters,
-                       "posemap": self.posemap, "metrics": self.metrics,
+                       "posemap": self.posemap, "posehints": self.posehints,
+                       "metrics": self.metrics,
                        "desired_running": self.desired_running,
                        "judged": self.judged, "judged_gate": self.judged_gate,
                        "img_rejects": self.img_rejects,
@@ -188,6 +191,10 @@ class Pipeline:
                 "seconds_left": (max(0, int(m["deadline"] - time.time()))
                                  if m.get("deadline") else None),
                 "accepted": self.accepted_count(),
+                # accepted_new = masters this run has added past its baseline;
+                # the target counts THESE, not the raw catalog total.
+                "accepted_new": (self.accepted_count() - m.get("baseline", 0)
+                                 if m.get("target") else None),
                 "review": self._count("review"),
                 "abandoned": len(self.abandoned),
                 "judge": bool(self.cfg.judge_enabled),
@@ -248,7 +255,14 @@ class Pipeline:
             if keep_mode:
                 pass                     # self.mode already holds the run's mode
             elif target:
-                self.mode = {"target": int(target)}
+                # target = how many NEW masters this run should add, not the
+                # raw catalog total. Snapshot the already-accepted count as a
+                # baseline so "5" means "5 more" even when 28 already exist
+                # (user complaint: "the number isn't the total, it's how many
+                # MORE I want"). Baseline lives in self.mode so it persists and
+                # survives a keep_mode auto-resume for free.
+                self.mode = {"target": int(target),
+                             "baseline": self.accepted_count()}
             elif minutes:
                 self.mode = {"deadline": time.time() + float(minutes) * 60,
                              "minutes": float(minutes)}
@@ -284,10 +298,18 @@ class Pipeline:
                                  or lib.master_exists(self.cfg, stem)))
         return self._count("final_up")
 
-    def _target_reached(self):
+    def _target_progress(self):
+        """(new_accepted_this_run, target) for target mode, else (0, 0).
+        new_accepted subtracts the baseline captured at start() so a run's
+        progress is counted from where it began, not from an empty catalog."""
         m = self.mode
-        return bool(m and m.get("target") and
-                    self.accepted_count() >= m["target"])
+        if not (m and m.get("target")):
+            return 0, 0
+        return self.accepted_count() - m.get("baseline", 0), m["target"]
+
+    def _target_reached(self):
+        done, target = self._target_progress()
+        return bool(target and done >= target)
 
     def _key_progress(self, key):
         """How far key's chain has got (higher = closer to a master)."""
@@ -323,7 +345,8 @@ class Pipeline:
         if not self.mode:
             return None
         if self.mode.get("target"):
-            n = max(0, self.mode["target"] - self.accepted_count())
+            done, target = self._target_progress()
+            n = max(0, target - done)
         else:
             n = WAVE_SIZE
         cand = [k for k in self.prompts
@@ -391,6 +414,7 @@ class Pipeline:
             self.prompts = {}
             self.letters = {}
             self.posemap = {}
+            self.posehints = {}
             self.judged = {}
             self.judged_gate = {}
             self.img_rejects = {}
@@ -426,6 +450,7 @@ class Pipeline:
             self.prompts = {}
             self.letters = {}
             self.posemap = {}
+            self.posehints = {}
             self.metrics = {}
             self.judged = {}
             self.judged_gate = {}
@@ -484,8 +509,9 @@ class Pipeline:
             note = "all stages complete ✓"
             while not self.cancel_flag:
                 if self._target_reached():
-                    note = (f"target reached ✓ — {self.accepted_count()} "
-                            "accepted masters")
+                    done, target = self._target_progress()
+                    note = (f"target reached ✓ — {done} new master(s) this run "
+                            f"({self.accepted_count()} in catalog)")
                     break
                 if self._time_up():
                     note = (f"time budget spent — {self.accepted_count()} "
@@ -495,9 +521,9 @@ class Pipeline:
                 if work == 0:
                     if self.mode and self.mode.get("target") and \
                             not self._target_reached():
+                        done, target = self._target_progress()
                         note = (f"prompt set exhausted at "
-                                f"{self.accepted_count()}/"
-                                f"{self.mode['target']} accepted masters — "
+                                f"{done}/{target} new masters this run — "
                                 "drop more HTML prompt files in")
                     break
             if self.cancel_flag:
@@ -541,15 +567,26 @@ class Pipeline:
         done += self._stage_judge_final()
         return done
 
+    #: prompt-file extensions auto-ingested from the drop folder. The parser
+    #: (html_prompts.extract_prompts_from_text) is format-agnostic — it scans
+    #: raw text for any balanced {...} block with a "scene" key — so a plain
+    #: .txt or .json file holding {"scene": "..."} works exactly like an HTML
+    #: export. .html/.htm kept for backward compatibility with FLUX exports.
+    PROMPT_GLOBS = ("*.html", "*.htm", "*.txt", "*.json")
+
     def _scan_html_dir(self):
-        """Auto-ingest *.html dropped into the prompts folder (new or edited
-        files only, tracked by mtime) — no UI upload needed."""
+        """Auto-ingest prompt files dropped into the folder (new or edited
+        files only, tracked by mtime) — no UI upload needed. Accepts .html/
+        .htm exports AND hand-written .txt/.json holding a {"scene": ...}
+        object; see PROMPT_GLOBS."""
         d = self.cfg.html_dir
         try:
             os.makedirs(d, exist_ok=True)
         except OSError:
             return
-        for p in sorted(glob.glob(os.path.join(d, "*.htm*"))):
+        paths = {p for pat in self.PROMPT_GLOBS
+                 for p in glob.glob(os.path.join(d, pat))}
+        for p in sorted(paths):
             name = os.path.basename(p)
             try:
                 mt = int(os.path.getmtime(p))
@@ -721,11 +758,14 @@ class Pipeline:
                 break
             self._working("judge_flux", done + 1, len(todo))
             path = os.path.join(src_dir, k + ".png")
-            ok, reason = judgemod.judge_image(self.cfg, path)
+            ok, reason, blocked = judgemod.judge_image_ex(self.cfg, path)
             with self.lock:
                 if ok:
                     self.judged[k] = True
                     self.judged_gate[k] = judgemod.CV_GATE_VERSION
+                    # remember which glide directions the judge ruled out so
+                    # the camera stage never dollies/pans into a near mass
+                    self.posehints[k] = blocked
                 else:
                     n = self.img_rejects.get(k, 0) + 1
                     self.img_rejects[k] = n
@@ -781,6 +821,7 @@ class Pipeline:
         self.judged_gate.pop(key, None)
         self.vid_judged.pop(stem, None)
         self.posemap.pop(stem, None)
+        self.posehints.pop(key, None)
         if flux_too:
             self.letters.pop(key, None)
 
@@ -945,9 +986,11 @@ class Pipeline:
             if self._should_stop():
                 break
             self._working("vid1", done + 1, len(stems))
-            letter = s.split("_", 1)[0]
-            pose = random.choice(self.cfg.poses)          # randomized direction
-            speed = self.cfg.speed_by_pose[pose]
+            letter, key = s.split("_", 1)[0], s.split("_", 1)[1]
+            # weighted, obstacle-aware direction (not uniform random): ~50%
+            # {up, dolly-back} vs 50% {dolly-fwd, left, right}, minus any
+            # direction the image judge flagged as blocked by a near mass.
+            pose, speed = self.cfg.choose_pose(self.posehints.get(key, []))
             self.posemap[s] = {"letter": letter, "pose": pose, "speed": speed}
             # native_long renders the whole ~10s clip here in one pass
             length = self.cfg.native_frames if self.cfg.native_long else None
