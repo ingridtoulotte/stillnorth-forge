@@ -28,6 +28,23 @@ STAGE_DIRS = {
     "review":    "10_review",          # AI-judge rejected masters (kept, not deleted)
 }
 
+# Volumetric / weather language that MUST never reach the Wan positive prompt.
+# At cfg=1 the positive prompt is the only steering signal (motion_prompts.json
+# doctrine): asking for "drifting fog", "rolling clouds", "falling snow" etc.
+# makes Wan hallucinate soft blobs that spawn and dissolve mid-clip — the
+# project's oldest, worst defect (README warning, Section 6.1). Any bespoke,
+# per-image motion clause produced by the judge is screened against this before
+# it is allowed to override the safe hand-written per-class default. Word-
+# boundary anchored so "terrain"/"landform"/"winding"/"formation" are NOT hit;
+# static-surface words (snow-on-ground, ice, frost) stay allowed — only mobile
+# volumetrics and spawn/dissolve verbs are banned.
+MOTION_DENY_RE = re.compile(
+    r"\b(fog\w*|mist\w*|smok\w*|smoke|haz\w*|steam\w*|clouds?\w*|snow\w*|"
+    r"sleet|hail|rain\w*|blizzard\w*|spray\w*|storm\w*|vapou?r\w*|"
+    r"billow\w*|swirl\w*|drift\w*|thicken\w*|forms?|forming|"
+    r"materiali\w*|dissolv\w*|spawn\w*|appear\w*|disappear\w*)\b",
+    re.IGNORECASE)
+
 
 def _load(name):
     with open(os.path.join(CONFIG_DIR, name), "r", encoding="utf-8") as fh:
@@ -339,12 +356,22 @@ class Config:
                 return text + sf["suffix"]
         return text
 
-    def motion_text(self, letter, prompt_text=""):
-        """Motion prompt for a class letter. A class may define keyword
-        `overrides`: when the FLUX source prompt mentions e.g. a waterfall,
-        the calm-water class-C prompt actively freezes the falls (cfg=1 --
-        the positive prompt is the only steering), so a falls-specific
-        motion prompt is substituted instead."""
+    def motion_text(self, letter, prompt_text="", custom=""):
+        """Motion prompt for a class letter, sent verbatim to Wan node 81 (the
+        ONLY steering signal at cfg=1). Resolution priority:
+
+        1. A class keyword `override` (e.g. waterfalls) ALWAYS wins. The falls
+           fast-shutter routing carries a specific downward-flow instruction
+           the calm-water default lacks, and must never be replaced by a
+           generic bespoke string (handoff guardrail 2).
+        2. Otherwise a per-image `custom` clause from the image judge, when
+           present and clean. It is re-screened against MOTION_DENY_RE
+           (defense-in-depth on top of the same denylist stated in the judge
+           prompt) and wrapped in a FIXED safety envelope, so the cfg=1
+           stability doctrine (stays sharp, nothing appears/disappears, no new
+           volumetrics) is always attached no matter what the VLM wrote.
+        3. Otherwise the safe hand-written per-class default.
+        """
         cls = self.classes[letter]
         text = (prompt_text or "").lower()
         if text:
@@ -352,6 +379,15 @@ class Config:
                 if any(re.search(r"\b" + re.escape(k.lower()), text)
                        for k in ov.get("keywords", ())):
                     return ov["motion"]
+        clause = (custom or "").strip().strip('"').strip()
+        if clause and not MOTION_DENY_RE.search(clause):
+            return ("Smooth professional aerial drone footage, "
+                    + clause.rstrip(". ")
+                    + ". Everything stays crisp, sharp, photorealistic and "
+                    "fine detail stays steady; no new fog, mist, smoke, haze, "
+                    "snow, rain or clouds; nothing appears or disappears; "
+                    "constant weather and lighting. High detail 4K nature "
+                    "documentary quality.")
         return cls["motion"]
 
     def choose_pose(self, blocked=(), rng=None):

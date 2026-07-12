@@ -76,6 +76,32 @@ def test_motion_keyword_override():
             cls["overrides"] = saved
 
 
+def test_motion_custom_clause():
+    """A clean per-image bespoke clause is wrapped in the fixed safety
+    envelope and used; a volumetric one is dropped back to the class default;
+    and a falls override ALWAYS beats a bespoke clause (guardrail 2)."""
+    cls = CFG.classes["A"]
+    out = CFG.motion_text("A", "", custom="gliding forward over the spruce ridge")
+    assert "spruce ridge" in out
+    assert "nothing appears or disappears" in out          # safety envelope attached
+    # volumetric clause -> denylisted -> safe class default
+    assert CFG.motion_text("A", "", custom="drifting fog rolls in") == cls["motion"]
+    # empty custom -> class default
+    assert CFG.motion_text("A", "", custom="") == cls["motion"]
+    # falls override wins even when a bespoke clause is supplied
+    saved = CFG.classes["C"].get("overrides")
+    CFG.classes["C"]["overrides"] = [{"keywords": ["waterfall"],
+                                      "motion": "FALLS-MOTION"}]
+    try:
+        assert CFG.motion_text("C", "a tall waterfall",
+                               custom="panning over the calm lake") == "FALLS-MOTION"
+    finally:
+        if saved is None:
+            CFG.classes["C"].pop("overrides", None)
+        else:
+            CFG.classes["C"]["overrides"] = saved
+
+
 def test_flux_suffix_augmentation():
     """Falls-keyword sources get fast-shutter language appended to the FLUX
     prompt (a long-exposure silky waterfall still gives Wan nothing to move)."""

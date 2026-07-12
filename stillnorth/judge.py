@@ -34,7 +34,7 @@ import urllib.request
 # IMPOSSIBLE rejects, and natural repetition is explicitly ruled out
 # (uniform ripples/mist were the dominant false-positive source).
 IMAGE_PROMPT = (
-    "Look at this nature photograph and answer in exactly three lines.\n"
+    "Look at this nature photograph and answer in exactly four lines.\n"
     "Line 1 — from WHERE was the camera when this was taken? Reply exactly "
     "one of:\n"
     "VANTAGE: AIR — camera clearly airborne (drone/helicopter), high above "
@@ -63,7 +63,19 @@ IMAGE_PROMPT = (
     "ridge or dense wall of trees filling the foreground or one whole side. "
     "If the view is open in every direction, reply exactly: MOVE-BLOCK: NONE. "
     "Otherwise reply: MOVE-BLOCK: <FORWARD/LEFT/RIGHT/UP, comma-separated>.\n"
-    "Three lines only."
+    "Line 4 — write ONE short vivid clause (about 12-25 words) describing the "
+    "scene a slow aerial drone drifts over in THIS image: NAME the one or two "
+    "SOLID landscape features it moves across and the feature it heads toward "
+    "(a ridge, treeline, shoreline, rock face, frozen channel, river bend). Do "
+    "NOT state a left/right/forward/up direction — the camera path is chosen "
+    "separately. Reply exactly: MOTION: <clause>.\n"
+    "HARD RULE for line 4: describe ONLY camera movement over solid ground, "
+    "rock, ice, forest or a water surface. NEVER mention fog, mist, cloud, "
+    "smoke, haze, steam, falling snow, rain, spray or wind, and never say "
+    "anything forms, drifts, thickens, appears or disappears — those wreck "
+    "the render. If the frame is mostly sky, fog or cloud with no solid "
+    "feature to track, reply exactly: MOTION: NONE.\n"
+    "Four lines only."
 )
 
 VIDEO_PROMPT = (
@@ -167,6 +179,31 @@ def _parse_obstacles(text):
                 return []
             return [d for d in _MOVE_DIRS if d in rest]
     return []
+
+
+def _parse_motion(text):
+    """Extract the VLM's Line-4 bespoke camera-motion clause, or '' to fall
+    back to the safe per-class default.
+
+    cfg=1 makes the Wan positive prompt the ONLY steering signal, so
+    volumetric language ("drifting fog", "rolling clouds", "falling snow") is
+    exactly what spawned the blob-hallucination defect this project spent a
+    whole session killing (Section 6.1). A bespoke clause is therefore
+    accepted ONLY if it clears the hard volumetric/weather denylist
+    (config.MOTION_DENY_RE) — the deterministic second guard on top of the
+    same rule stated in the prompt itself. 'MOTION: NONE', empty, or an
+    over-long reply returns '' and the hand-written class default is used."""
+    from .config import MOTION_DENY_RE
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("motion:"):
+            clause = stripped.split(":", 1)[1].strip().strip('"').strip()
+            low = clause.lower()
+            if (not clause or low == "none" or len(clause) > 240
+                    or MOTION_DENY_RE.search(clause)):
+                return ""
+            return clause
+    return ""
 
 
 def available(cfg):
@@ -285,26 +322,32 @@ def judge_image(cfg, path):
     Gate 2 is the VLM plausibility check. Errors talking to Ollama do NOT
     reject work (the batch must survive a stopped Ollama): they pass with a
     logged reason instead."""
-    ok, reason, _ = judge_image_ex(cfg, path)
+    ok, reason, _, _ = judge_image_ex(cfg, path)
     return ok, reason
 
 
 def judge_image_ex(cfg, path):
-    """Like judge_image but ALSO returns the VLM's move-block directions —
-    which way a near foreground mass rules out gliding (Line-3 MOVE-BLOCK).
-    Same single VLM call, additive parse: the camera stage reads these to
-    avoid panning/dollying straight into a wall. Returns (ok, reason,
-    blocked_dirs). CV-gate failure or an Ollama error returns []."""
+    """Like judge_image but ALSO returns, from the SAME single VLM call, the
+    two per-image steering signals the camera/motion stage consumes:
+
+    * blocked_dirs — which way a near foreground mass rules out gliding
+      (Line-3 MOVE-BLOCK), so the camera never dollies/pans into a wall.
+    * motion — a bespoke, denylist-screened camera-motion clause for THIS
+      image (Line-4 MOTION), or '' to fall back to the class default.
+
+    Additive parse, no extra round-trip. Returns
+    (ok, reason, blocked_dirs, motion). CV-gate failure or an Ollama error
+    returns ([], "")."""
     ok, reason = cv_gate(cfg, path)
     if not ok:
-        return False, reason, []
+        return False, reason, [], ""
     try:
         text = _chat(cfg, IMAGE_PROMPT, [_b64_image(path)])
         ok, reason = _parse_verdict(text)
-        return ok, reason, _parse_obstacles(text)
+        return ok, reason, _parse_obstacles(text), _parse_motion(text)
     except Exception as e:
         return (True, f"judge unavailable ({e.__class__.__name__}) — passed "
-                "unjudged", [])
+                "unjudged", [], "")
 
 
 def _duration(cfg, path):
