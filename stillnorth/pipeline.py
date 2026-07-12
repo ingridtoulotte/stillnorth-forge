@@ -74,6 +74,7 @@ class Pipeline:
         self.desired_running = False  # crash-safe intent: auto-resume on launch
         # AI-judge bookkeeping (all persisted)
         self.judged = {}       # key  -> True   (flux still accepted)
+        self.judged_gate = {}  # key  -> CV_GATE_VERSION that accepted it
         self.img_rejects = {}  # key  -> reject count so far
         self.vid_judged = {}   # stem -> True/False (master verdict)
         self.vid_rejects = {}  # key  -> master remake count so far
@@ -103,6 +104,7 @@ class Pipeline:
                 self.metrics = d.get("metrics", {})
                 self.desired_running = bool(d.get("desired_running", False))
                 self.judged = d.get("judged", {})
+                self.judged_gate = d.get("judged_gate", {})
                 self.img_rejects = d.get("img_rejects", {})
                 self.vid_judged = d.get("vid_judged", {})
                 self.vid_rejects = d.get("vid_rejects", {})
@@ -121,7 +123,8 @@ class Pipeline:
             json.dump({"prompts": self.prompts, "letters": self.letters,
                        "posemap": self.posemap, "metrics": self.metrics,
                        "desired_running": self.desired_running,
-                       "judged": self.judged, "img_rejects": self.img_rejects,
+                       "judged": self.judged, "judged_gate": self.judged_gate,
+                       "img_rejects": self.img_rejects,
                        "vid_judged": self.vid_judged,
                        "vid_rejects": self.vid_rejects,
                        "abandoned": self.abandoned,
@@ -389,6 +392,7 @@ class Pipeline:
             self.letters = {}
             self.posemap = {}
             self.judged = {}
+            self.judged_gate = {}
             self.img_rejects = {}
             self.vid_judged = {}
             self.vid_rejects = {}
@@ -424,6 +428,7 @@ class Pipeline:
             self.posemap = {}
             self.metrics = {}
             self.judged = {}
+            self.judged_gate = {}
             self.img_rejects = {}
             self.vid_judged = {}
             self.vid_rejects = {}
@@ -704,6 +709,7 @@ class Pipeline:
         if not self._judge_on:
             return 0
         src_dir = self.cfg.stage_dir("flux", ensure=False)
+        self._regate_stale_stills(src_dir)
         todo = [k for k in self._keys_with_png(src_dir)
                 if k not in self.judged and self._allowed(k)]
         if not todo:
@@ -719,12 +725,14 @@ class Pipeline:
             with self.lock:
                 if ok:
                     self.judged[k] = True
+                    self.judged_gate[k] = judgemod.CV_GATE_VERSION
                 else:
                     n = self.img_rejects.get(k, 0) + 1
                     self.img_rejects[k] = n
                     if n > self.cfg.judge_image_retries:
                         if self.cfg.judge_giveup == "accept":
                             self.judged[k] = True
+                            self.judged_gate[k] = judgemod.CV_GATE_VERSION
                             self._log(f"judge_flux {k}: accepted after {n - 1} "
                                       f"rejects (giving up) — last: {reason}")
                         else:
@@ -770,10 +778,37 @@ class Pipeline:
                     self._log(f"judge cleanup: could not remove {p}: {e}")
         # bookkeeping tied to the dead chain (caller holds the lock)
         self.judged.pop(key, None)
+        self.judged_gate.pop(key, None)
         self.vid_judged.pop(stem, None)
         self.posemap.pop(stem, None)
         if flux_too:
             self.letters.pop(key, None)
+
+    def _regate_stale_stills(self, src_dir):
+        """Re-run the deterministic CV gate on stills accepted under an OLDER
+        CV_GATE_VERSION (e.g. sources judged before struct_ratio existed). A
+        persisted judged=True would otherwise grandfather such a source past a
+        gate added after it was first judged — exactly how dense-micro-texture
+        "240p mush" masters shipped after the struct_ratio gate went live but
+        their pre-gate accepts were never re-checked. CV-only: no VLM re-call,
+        so it is cheap and repeatable (a re-VLM could spuriously flip a good
+        still). A stale still that now fails the gate has its whole chain
+        dropped so a fresh, gate-passing source regenerates in its place."""
+        stale = [k for k in list(self.judged)
+                 if self.judged.get(k)
+                 and self.judged_gate.get(k, 0) < judgemod.CV_GATE_VERSION
+                 and os.path.exists(os.path.join(src_dir, k + ".png"))]
+        for k in stale:
+            ok, reason = judgemod.cv_gate(
+                self.cfg, os.path.join(src_dir, k + ".png"))
+            with self.lock:
+                if ok:
+                    self.judged_gate[k] = judgemod.CV_GATE_VERSION
+                else:
+                    self._log(f"regate DROP {k}: pre-gate accept fails current "
+                              f"CV gate (v{judgemod.CV_GATE_VERSION}) — {reason}")
+                    self._delete_key_files(k, flux_too=True)
+                self._save_state()
 
     # ---- STAGE 9b: AI-judge the finished masters --------------------------
     def _stage_judge_final(self):

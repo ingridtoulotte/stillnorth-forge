@@ -308,6 +308,7 @@ class TestDeleteChain(PipelineFixture):
 class TestStatePersistence(PipelineFixture):
     def test_judge_state_roundtrip(self):
         self.pipe.judged = {"k1": True}
+        self.pipe.judged_gate = {"k1": 2}
         self.pipe.img_rejects = {"k2": 1}
         self.pipe.vid_judged = {"A_k1": True}
         self.pipe.vid_rejects = {"k3": 2}
@@ -321,11 +322,63 @@ class TestStatePersistence(PipelineFixture):
             from stillnorth.pipeline import Pipeline
             p2 = Pipeline()
         self.assertEqual(p2.judged, {"k1": True})
+        self.assertEqual(p2.judged_gate, {"k1": 2})
         self.assertEqual(p2.img_rejects, {"k2": 1})
         self.assertEqual(p2.vid_judged, {"A_k1": True})
         self.assertEqual(p2.abandoned, ["k3"])
         self.assertEqual(p2.html_seen, {"a.html": 123})
         self.assertEqual(p2.mode, {"target": 5})
+
+
+class TestRegateStaleStills(PipelineFixture):
+    """A still accepted under an OLDER CV gate version must be re-checked on
+    resume — never grandfathered past a gate added after it was first judged
+    (the bug that shipped dense-micro-texture "240p mush" masters whose
+    pre-struct_ratio-gate accepts were never re-evaluated)."""
+
+    def _flux(self, k):
+        p = os.path.join(self.ws, STAGE_DIRS["flux"], k + ".png")
+        touch(p)
+        return p
+
+    def _src_dir(self):
+        return self.cfg.stage_dir("flux", ensure=False)
+
+    def test_stale_fail_drops_chain(self):
+        self.pipe.letters["k1"] = "A"
+        self.pipe.judged["k1"] = True          # no judged_gate -> version 0
+        p = self._flux("k1")
+        with mock.patch("stillnorth.pipeline.judgemod.cv_gate",
+                        return_value=(False, "mush")):
+            self.pipe._regate_stale_stills(self._src_dir())
+        self.assertNotIn("k1", self.pipe.judged)
+        self.assertFalse(os.path.exists(p))
+
+    def test_stale_pass_stamps_version(self):
+        from stillnorth.judge import CV_GATE_VERSION
+        self.pipe.judged["k1"] = True
+        self._flux("k1")
+        with mock.patch("stillnorth.pipeline.judgemod.cv_gate",
+                        return_value=(True, "")):
+            self.pipe._regate_stale_stills(self._src_dir())
+        self.assertTrue(self.pipe.judged.get("k1"))
+        self.assertEqual(self.pipe.judged_gate.get("k1"), CV_GATE_VERSION)
+
+    def test_current_version_not_rechecked(self):
+        from stillnorth.judge import CV_GATE_VERSION
+        self.pipe.judged["k1"] = True
+        self.pipe.judged_gate["k1"] = CV_GATE_VERSION
+        self._flux("k1")
+        with mock.patch("stillnorth.pipeline.judgemod.cv_gate") as g:
+            self.pipe._regate_stale_stills(self._src_dir())
+            g.assert_not_called()
+
+    def test_missing_png_skipped(self):
+        self.pipe.judged["k1"] = True          # stale, but no still on disk
+        with mock.patch("stillnorth.pipeline.judgemod.cv_gate") as g:
+            self.pipe._regate_stale_stills(self._src_dir())
+            g.assert_not_called()
+        self.assertTrue(self.pipe.judged.get("k1"))
 
 
 class TestHtmlAutoload(PipelineFixture):

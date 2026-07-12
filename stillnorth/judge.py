@@ -213,13 +213,23 @@ def image_risk_metrics(path, scale_w=768):
             "struct_ratio": ratio}
 
 
-def judge_image(cfg, path):
-    """(ok, reason) for one FLUX still. Gate 1 is a deterministic CV
-    animate-risk check (fog coverage + outright blur) — this is where bad
-    videos are prevented, at the cheap image stage, instead of detected
-    after 14 minutes of render. Gate 2 is the VLM plausibility check.
-    Errors talking to Ollama do NOT reject work (the batch must survive a
-    stopped Ollama): they pass with a logged reason instead."""
+# Version of the deterministic CV image gate (cv_gate below). BUMP this whenever
+# the gate's checks or thresholds change (a new metric, a retuned threshold). The
+# pipeline stamps each accepted still with the version that approved it and
+# re-gates any still stamped older on resume — so a source accepted before a gate
+# existed can never grandfather itself past the gate added later. History:
+#   v1 = fog_cover + sharp (pre-2026-07-10)
+#   v2 = + struct_ratio micro-texture gate, sharp threshold raised 60->110
+CV_GATE_VERSION = 2
+
+
+def cv_gate(cfg, path):
+    """Deterministic CV animate-risk gate for one FLUX still (fog / blur /
+    uniform-micro-texture). No VLM — cheap and repeatable, so it is safe to
+    re-run on already-accepted stills. Returns (ok, reason); best-effort: any
+    error reading/metricing the image passes (True, "") rather than blocking
+    the batch. This is gate 1 of judge_image AND the pipeline's stale-still
+    re-gate (Pipeline._regate_stale_stills)."""
     try:
         rm = image_risk_metrics(path)
         if rm["fog_cover"] > cfg.judge_fog_cover_max:
@@ -238,7 +248,20 @@ def judge_image(cfg, path):
                            "temporally averages dense identical elements "
                            "into mush")
     except Exception:
-        pass                                     # CV gate is best-effort
+        return True, ""                          # CV gate is best-effort
+    return True, ""
+
+
+def judge_image(cfg, path):
+    """(ok, reason) for one FLUX still. Gate 1 is the deterministic CV
+    animate-risk check (cv_gate) — this is where bad videos are prevented, at
+    the cheap image stage, instead of detected after 14 minutes of render.
+    Gate 2 is the VLM plausibility check. Errors talking to Ollama do NOT
+    reject work (the batch must survive a stopped Ollama): they pass with a
+    logged reason instead."""
+    ok, reason = cv_gate(cfg, path)
+    if not ok:
+        return False, reason
     try:
         ok, reason = _parse_verdict(_chat(cfg, IMAGE_PROMPT, [_b64_image(path)]))
         return ok, reason
