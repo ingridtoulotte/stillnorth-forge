@@ -56,9 +56,18 @@ def main():
         pass
     ap = argparse.ArgumentParser(prog="stillnorth")
     ap.add_argument("cmd", nargs="?", default="serve",
-                    choices=["serve", "nodes"], help="serve (default) or nodes")
+                    choices=["serve", "nodes", "loop"],
+                    help="serve (default), nodes, or loop")
     ap.add_argument("arg", nargs="?", help="workflow json path for 'nodes'")
     ap.add_argument("--no-browser", action="store_true")
+    # 'loop' options (§5E slideshow loop-publishing)
+    ap.add_argument("--stills", help="loop: comma-separated source-still hashes")
+    ap.add_argument("--name", default="loop", help="loop: output basename")
+    ap.add_argument("--audio", help="loop: ambient bed (wind/rain/drone/still)")
+    ap.add_argument("--no-kenburns", action="store_true",
+                    help="loop: static stills instead of Ken Burns")
+    ap.add_argument("--no-shorts", action="store_true",
+                    help="loop: skip the 9:16 Shorts cut")
     a = ap.parse_args()
 
     if a.cmd == "nodes":
@@ -75,6 +84,30 @@ def main():
                 lines.append(f"(no .json files in {WORKFLOWS_DIR})")
             sys.exit("\n".join(lines))
         return _list_nodes(path)
+
+    if a.cmd == "loop":
+        if not a.stills:
+            sys.exit("usage: python -m stillnorth loop --stills A_x,B_y,... "
+                     "[--name N] [--audio wind] [--no-kenburns] [--no-shorts]")
+        from .config import get_config
+        from . import loopjob
+        cfg = get_config()
+        hashes = [h.strip() for h in a.stills.split(",") if h.strip()]
+        try:
+            res = loopjob.build_loop_job(
+                cfg, hashes, name=a.name, audio_kind=a.audio,
+                make_shorts=not a.no_shorts, kenburns=not a.no_kenburns,
+                log=lambda m: print(f"  {m}"))
+        except FileNotFoundError as e:
+            sys.exit(str(e))
+        if not res:
+            sys.exit("loop build failed (see log above)")
+        print(f"\nbase loop : {res['base']}  (~{res['duration']:.0f}s)")
+        for k, p in res["tiers"].items():
+            print(f"tier {k:<6}: {p}")
+        if res["short"]:
+            print(f"shorts    : {res['short']}")
+        return
 
     from .server import serve
     serve(open_browser=not a.no_browser)

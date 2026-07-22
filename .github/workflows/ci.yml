@@ -33,3 +33,5 @@ jobs:
         run: python tests/test_slideshow.py
       - name: Publish lane tests (tier/audio math, no deps)
         run: python tests/test_publish.py
+      - name: Loop-job tests (still-hash resolution guard, no deps)
+        run: python tests/test_loopjob.py
