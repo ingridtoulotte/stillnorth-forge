@@ -94,5 +94,14 @@
       "4": 4
     }
   },
-  "final_grade": "eq=contrast=0.93:gamma=1.04:saturation=0.97"
+  "final_grade": "eq=contrast=0.93:gamma=1.04:saturation=0.97",
+
+  "slideshow": {
+    "hold_seconds": 7.0,
+    "xfade_seconds": 2.5,
+    "kenburns_zoom": 1.08,
+    "height": 2160,
+    "audio_kind": "wind",
+    "tiers": {"1min": 60, "30min": 1800, "1h": 3600}
+  }
 }

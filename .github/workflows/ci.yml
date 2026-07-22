@@ -29,3 +29,7 @@ jobs:
         run: python tests/test_server.py
       - name: Assembler tests (selection, usage buckets, retention, preview)
         run: python tests/test_assembler.py
+      - name: Slideshow lane tests (loop-graph math, no deps)
+        run: python tests/test_slideshow.py
+      - name: Publish lane tests (tier/audio math, no deps)
+        run: python tests/test_publish.py

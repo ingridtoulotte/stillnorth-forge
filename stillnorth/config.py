@@ -26,6 +26,7 @@ STAGE_DIRS = {
     "concat":    "08_concat",          # clip1 + clip2 joined (~10-11s)
     "final_up":  "09_final_up4",       # final clips upscaled x4
     "review":    "10_review",          # AI-judge rejected masters (kept, not deleted)
+    "slideshow": "12_slideshows",      # §5E loop-publishing: still-image slideshows
 }
 
 # Volumetric / weather language that MUST never reach the Wan positive prompt.
@@ -317,6 +318,17 @@ class Config:
         self.autodelete = bool(a.get("autodelete_enabled", True))
         self.asm_default_weights = a.get(
             "default_weights", {"0": 60, "1": 20, "2": 10, "3": 6, "4": 4})
+
+        # slideshow lane (§5E loop-publishing, all optional/defaulted). A GPU-free
+        # still-image slideshow: Ken Burns + crossfades -> seamless loop, then an
+        # ambient bed + duration tiers. Does not touch the Wan/FLUX render core.
+        s = self.raw.get("slideshow", {})
+        self.ss_hold = float(s.get("hold_seconds", 7.0))
+        self.ss_xfade = float(s.get("xfade_seconds", 2.5))
+        self.ss_zoom = float(s.get("kenburns_zoom", 1.08))
+        self.ss_height = int(s.get("height", 2160))
+        self.ss_audio_kind = str(s.get("audio_kind", "wind"))
+        self.ss_tiers = s.get("tiers", {"1min": 60, "30min": 1800, "1h": 3600})
 
     @staticmethod
     def _sibling_tool(ffmpeg_path, name):
