@@ -104,6 +104,41 @@ The **Last done** card shows only the single most-recent artifact (latest image 
 
 ---
 
+## 🔁 Loop publishing (still-image slideshows)
+
+A second, **GPU-free** way to fill the channel (the "loop pivot"). Instead of
+rendering a catalog of hundreds of Wan clips, turn a handful of already-rendered
+4K stills into one **seamless-looping** ambient video, then multiply it into many
+uploads with ambient audio beds and duration tiers — all ffmpeg, no ComfyUI/GPU.
+It does **not** touch the Wan/FLUX render core.
+
+```bash
+# build one loop from source-still hashes (found in 03_classified/)
+python -m stillnorth loop --name boreal_journey \
+    --stills A_eb92140e13914713,B_128f86009656c97a,D_f0019bc3fa9086eb \
+    --audio wind
+```
+
+Outputs land in `12_slideshows/`: the base loop, one file per duration tier
+(`_1min` / `_30min` / `_1h`, each with a fresh ambient bed), and a 9:16 Shorts cut.
+
+**How the loop is seamless.** Each still gets a slow Ken Burns pass; consecutive
+stills cross-dissolve; then a short **identical-frame wrap clip** (a static hold of
+shot 1's first frame) is appended so the sequence's last frame is pixel-identical to
+its first. `ffmpeg -stream_loop` then repeats it with an invisible hard cut — no
+wrap-dissolve maths across the loop boundary (measured: loop-seam PSNR ≈ 39 dB, well
+above the video's own frame-to-frame motion floor ≈ 33 dB).
+
+**Audio is the multiplier.** Beds are procedural (`wind` / `rain` / `drone` /
+`still`), generated fresh at each tier's full length (never looped, so no audio
+seam). One visual loop × N beds = N videos at ~zero cost.
+
+Knobs live in the `slideshow` block of `config/config.json` (`hold_seconds`,
+`xfade_seconds`, `kenburns_zoom`, `height`, `audio_kind`, `tiers`). The
+`--no-kenburns` flag renders static stills; `--no-shorts` skips the vertical cut.
+
+---
+
 ## Requirements
 
 - **Python 3.9+** (3.12 recommended) — the server, queue, parser, ffmpeg orchestration and ComfyUI client are pure stdlib.
