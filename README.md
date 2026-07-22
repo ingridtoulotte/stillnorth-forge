@@ -163,6 +163,20 @@ Configure the `dive` block in `config/config.json` (`venv_python`, `upscaler`, `
 `parallax`, `ssaa`, `judge_coherency`); default motion stays `kenburns`, so nothing
 changes unless you pass `--motion dive`.
 
+### 🧮 `judge-stills` — bulk coherency pre-screen (optional)
+
+```bash
+python -m stillnorth judge-stills --stills all --batch-size 12
+```
+
+Judges every still in `03_classified/` (or a comma-separated hash list) for gross
+coherency, either one-by-one (`--batch-size 1`, default, exact — matches the
+production per-image judge) or several images per Ollama call (`--batch-size 10-12`,
+~2.1× faster but ~8-12% extra false-rejects on a still that would have passed solo —
+measured in [`…-batch-judge-benchmark.md`](docs/spikes/2026-07-22-batch-judge-benchmark.md)).
+Fails open on any Ollama error — a still is never silently dropped. Use solo for
+small curated picks, batch only when bulk-screening a large pool.
+
 ---
 
 ## Requirements

@@ -56,12 +56,13 @@ def main():
         pass
     ap = argparse.ArgumentParser(prog="stillnorth")
     ap.add_argument("cmd", nargs="?", default="serve",
-                    choices=["serve", "nodes", "loop"],
-                    help="serve (default), nodes, or loop")
+                    choices=["serve", "nodes", "loop", "judge-stills"],
+                    help="serve (default), nodes, loop, or judge-stills")
     ap.add_argument("arg", nargs="?", help="workflow json path for 'nodes'")
     ap.add_argument("--no-browser", action="store_true")
     # 'loop' options (§5E slideshow loop-publishing)
-    ap.add_argument("--stills", help="loop: comma-separated source-still hashes")
+    ap.add_argument("--stills", help="loop: comma-separated source-still hashes. "
+                    "judge-stills: same, or the literal value 'all'")
     ap.add_argument("--name", default="loop", help="loop: output basename")
     ap.add_argument("--audio", help="loop: ambient bed (wind/rain/drone/still)")
     ap.add_argument("--no-kenburns", action="store_true",
@@ -72,6 +73,16 @@ def main():
                          "configured in config.json)")
     ap.add_argument("--no-shorts", action="store_true",
                     help="loop: skip the 9:16 Shorts cut")
+    # 'judge-stills' options -- bulk coherency pre-screen (see
+    # docs/spikes/2026-07-22-batch-judge-benchmark.md for the measured
+    # speed/accuracy tradeoff before using --batch-size > 1). Reuses --stills
+    # (also used by 'loop'); pass the literal value 'all' for every still in
+    # 03_classified.
+    ap.add_argument("--batch-size", type=int, default=1,
+                    help="judge-stills: images per Ollama call (default 1 = "
+                         "solo, exact/slow; measured best speed/accuracy "
+                         "tradeoff is 10-12, ~2.1x faster, ~88-92%% agreement "
+                         "with solo -- see the spike doc before raising this)")
     a = ap.parse_args()
 
     if a.cmd == "nodes":
@@ -119,6 +130,43 @@ def main():
             print(f"tier {k:<6}: {p}")
         if res["short"]:
             print(f"shorts    : {res['short']}")
+        return
+
+    if a.cmd == "judge-stills":
+        if not a.stills:
+            sys.exit("usage: python -m stillnorth judge-stills --stills all|A_x,B_y,... "
+                     "[--batch-size 12]")
+        import time
+        from .config import get_config
+        from . import judge
+        cfg = get_config()
+        if a.stills.strip().lower() == "all":
+            d = cfg.stage_dir("classified", ensure=False)
+            paths = sorted(glob.glob(os.path.join(d, "*.png")))
+            if not paths:
+                sys.exit(f"no classified stills found in {d}")
+        else:
+            from . import loopjob
+            try:
+                paths = loopjob.resolve_stills(
+                    cfg, [h.strip() for h in a.stills.split(",") if h.strip()])
+            except FileNotFoundError as e:
+                sys.exit(str(e))
+        if not judge.available(cfg):
+            sys.exit("Ollama not reachable -- nothing to judge with")
+        bs = max(1, a.batch_size)
+        print(f"judging {len(paths)} stills, batch_size={bs}"
+             f"{' (solo)' if bs <= 1 else ''}...")
+        t0 = time.time()
+        accepted, rejected = judge.judge_stills_prefilter(
+            cfg, paths, batch_size=bs, log=lambda m: print(f"  {m}"))
+        dt = time.time() - t0
+        print(f"\n{len(accepted)}/{len(paths)} accepted in {dt:.0f}s "
+             f"({dt / max(len(paths),1):.1f}s/still)")
+        if rejected:
+            print(f"{len(rejected)} rejected:")
+            for r in rejected:
+                print(f"  {os.path.basename(r['path'])}: {r['severity']}")
         return
 
     from .server import serve

@@ -23,6 +23,7 @@ import base64
 import json
 import os
 import random
+import re
 import subprocess
 import tempfile
 import urllib.request
@@ -119,6 +120,23 @@ def _b64_image(path, max_side=1024):
         return base64.b64encode(fh.read()).decode()
 
 
+def _judge_num_ctx(n_images):
+    """Ollama's default served context (4096) doesn't even fit ONE image + the
+    IMAGE_PROMPT (measured: 4223 tokens needed) -- every image-judge call was
+    silently failing (HTTP 400 exceed_context_size_error), caught by
+    judge_image_ex's except-Exception fail-open, and passing unjudged with NO
+    visible error. Scale generously with image count (measured needs: 1 img
+    ~4.2k tokens, 5 imgs ~11k, 10 imgs ~18k tokens -- roughly 1.5-1.7k/image
+    plus a ~2.5k base for prompt + expected output), floored at the
+    proven-working 6144 for the single-image case. Capped at 32768: the spike
+    benchmark hit a hard HTTP 413 (payload too large) around 20 images,
+    independent of num_ctx, so nothing legitimately needs more than this, and
+    an uncapped value driven by a large --batch-size would request more
+    context/KV-cache than this machine's tight GPU headroom can safely take
+    from the SHARED Ollama server the production judge also depends on."""
+    return min(32768, max(6144, 3072 + 2048 * max(1, n_images)))
+
+
 def _chat(cfg, prompt, images):
     """One Ollama /api/chat round. Returns the raw text reply ('' on none).
     Freeform (no format=json): the severity protocol parses by prefix, and
@@ -128,7 +146,7 @@ def _chat(cfg, prompt, images):
         "messages": [{"role": "user", "content": prompt, "images": images}],
         "stream": False,
         "think": False,
-        "options": {"temperature": 0},
+        "options": {"temperature": 0, "num_ctx": _judge_num_ctx(len(images))},
         "keep_alive": cfg.judge_keep_alive,
     }).encode()
     req = urllib.request.Request(cfg.ollama_url + "/api/chat", body,
@@ -160,6 +178,88 @@ def _parse_verdict(text):
     if "VANTAGE: GROUND" in up or first.startswith("VANTAGE: GROUND"):
         return False, ("off-brief: " + t.replace("\n", " "))[:160]
     return True, t.replace("\n", " ")[:160]
+
+
+# --------------------------------------------------------------------------- #
+# Batched multi-image coherency pre-screen -- OPT-IN, separate from the per-
+# image production judge above. Measured (docs/spikes/2026-07-22-batch-judge-
+# benchmark.md, 24 real classified stills, this project's own judge model):
+# a real ~2.1x throughput win at batch size 10-12, but a real accuracy cost --
+# 8-12% of images get a DIFFERENT accept/reject decision than solo judging,
+# always in the same direction (a still solo correctly passes gets wrongly
+# flagged IMPOSSIBLE when crowded with others -- attention dilution). Because
+# the per-shot dive/loop cost is dominated by upscale+render (coherency is a
+# small slice of it), batching only pays off at BULK scale (pre-screening a
+# large still pool before curating loops), not inside the per-shot build path
+# -- so this is a standalone bulk-screening tool, not wired into dive_shot.
+BATCH_COHERENCY_PROMPT_TMPL = (
+    "You will see {k} numbered aerial landscape photos, each a SEPARATE, "
+    "UNRELATED candidate still for a video project. Judge EACH one independently "
+    "for gross implausibility only (garbled geometry, impossible physics, "
+    "nonsensical scene) -- normal landscape imperfections (fog, low light, motion "
+    "blur, compression) are NOT a defect.\n"
+    "Respond with EXACTLY {k} lines, nothing else, one per image in order, exactly "
+    "in this format (severity is one word: NONE, MINOR, or IMPOSSIBLE):\n"
+    "1: <severity>\n2: <severity>\n...\n{k}: <severity>")
+
+_BATCH_LINE_RE = re.compile(r"^\s*(\d+)\s*[:\.\)]\s*(NONE|MINOR|IMPOSSIBLE)\b",
+                            re.IGNORECASE)
+
+
+def parse_batch_coherency(text, k):
+    """Pure parser: reply text -> list of k severities (None where unparsed),
+    matched by the leading index each line declares (order-robust)."""
+    out = [None] * k
+    for line in (text or "").splitlines():
+        m = _BATCH_LINE_RE.match(line)
+        if m:
+            idx = int(m.group(1)) - 1
+            if 0 <= idx < k:
+                out[idx] = m.group(2).upper()
+    return out
+
+
+def judge_images_batch(cfg, paths):
+    """ONE Ollama call judging len(paths) stills together. Returns
+    {path: (ok, severity_or_None)}. severity is None when the model dropped
+    that line (fails OPEN, same spirit as the solo judge -- an unparsed image
+    is not penalised for the model's formatting slip). Ollama/network errors
+    propagate (caller decides fail-open vs abort for a bulk run)."""
+    k = len(paths)
+    images = [_b64_image(p) for p in paths]
+    prompt = BATCH_COHERENCY_PROMPT_TMPL.format(k=k)
+    text = _chat(cfg, prompt, images)
+    sevs = parse_batch_coherency(text, k)
+    return {p: (sev != "IMPOSSIBLE" if sev else True, sev) for p, sev in zip(paths, sevs)}
+
+
+def judge_stills_prefilter(cfg, paths, batch_size=12, log=None):
+    """Bulk coherency pre-screen: chunk `paths` into `batch_size` groups, one
+    Ollama call per chunk. Returns (accepted, rejected) -- accepted preserves
+    input order; rejected is a list of {"path","severity"} dicts. A chunk that
+    errors (Ollama down, timeout) fails OPEN -- every path in it is accepted,
+    logged, never silently dropped."""
+    bs = max(1, batch_size)
+    accepted, rejected = [], []
+    for i in range(0, len(paths), bs):
+        chunk = paths[i:i + bs]
+        try:
+            verdicts = judge_images_batch(cfg, chunk)
+        except Exception as e:
+            if log:
+                log(f"batch judge chunk {i}-{i+len(chunk)} unavailable "
+                    f"({e.__class__.__name__}) — passed unjudged")
+            accepted.extend(chunk)
+            continue
+        for p in chunk:
+            ok, sev = verdicts.get(p, (True, None))
+            if ok:
+                accepted.append(p)
+            else:
+                rejected.append({"path": p, "severity": sev})
+                if log:
+                    log(f"batch judge: {os.path.basename(p)} rejected ({sev})")
+    return accepted, rejected
 
 
 # camera-glide directions the WanCameraEmbedding vocabulary can move
