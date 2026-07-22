@@ -29,7 +29,7 @@ def resolve_stills(cfg, hashes):
 
 def build_loop_job(cfg, hashes, name="loop", audio_kind=None, tiers=None,
                    make_shorts=True, hold=None, xfade=None, zoom=None,
-                   kenburns=True, log=None, cancel=None):
+                   kenburns=True, motion="kenburns", log=None, cancel=None):
     """Build a seamless loop from `hashes` and publish tiers + Shorts.
 
     Returns {"base","duration","tiers":{key:path},"short"} on success, or None
@@ -45,7 +45,7 @@ def build_loop_job(cfg, hashes, name="loop", audio_kind=None, tiers=None,
         xfade=cfg.ss_xfade if xfade is None else xfade,
         zoom=cfg.ss_zoom if zoom is None else zoom,
         height=cfg.ss_height, workdir=work, kenburns=kenburns,
-        log=log, cancel=cancel)
+        motion=motion, log=log, cancel=cancel)
     if not b:
         return None
     kind = audio_kind or cfg.ss_audio_kind

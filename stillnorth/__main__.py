@@ -66,6 +66,10 @@ def main():
     ap.add_argument("--audio", help="loop: ambient bed (wind/rain/drone/still)")
     ap.add_argument("--no-kenburns", action="store_true",
                     help="loop: static stills instead of Ken Burns")
+    ap.add_argument("--motion", choices=["kenburns", "dive"], default="kenburns",
+                    help="loop: shot motion -- 'kenburns' (default) or 'dive' "
+                         "(DepthFlow depth-parallax; needs the dive venv "
+                         "configured in config.json)")
     ap.add_argument("--no-shorts", action="store_true",
                     help="loop: skip the 9:16 Shorts cut")
     a = ap.parse_args()
@@ -92,12 +96,20 @@ def main():
         from .config import get_config
         from . import loopjob
         cfg = get_config()
+        if a.motion == "dive":
+            from . import dive
+            if not cfg.dive_enabled:
+                sys.exit("dive motion is disabled -- set dive.enabled=true in "
+                         "config/config.json")
+            if not dive.dive_available(cfg):
+                sys.exit("dive venv not found -- set dive.venv_python (a python with "
+                         "depthflow installed) in config.json's dive block")
         hashes = [h.strip() for h in a.stills.split(",") if h.strip()]
         try:
             res = loopjob.build_loop_job(
                 cfg, hashes, name=a.name, audio_kind=a.audio,
                 make_shorts=not a.no_shorts, kenburns=not a.no_kenburns,
-                log=lambda m: print(f"  {m}"))
+                motion=a.motion, log=lambda m: print(f"  {m}"))
         except FileNotFoundError as e:
             sys.exit(str(e))
         if not res:

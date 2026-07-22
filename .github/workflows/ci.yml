@@ -35,3 +35,5 @@ jobs:
         run: python tests/test_publish.py
       - name: Loop-job tests (still-hash resolution guard, no deps)
         run: python tests/test_loopjob.py
+      - name: Dive lane tests (subprocess-arg + config, no deps)
+        run: python tests/test_dive.py

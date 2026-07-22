@@ -137,6 +137,32 @@ Knobs live in the `slideshow` block of `config/config.json` (`hold_seconds`,
 `xfade_seconds`, `kenburns_zoom`, `height`, `audio_kind`, `tiers`). The
 `--no-kenburns` flag renders static stills; `--no-shorts` skips the vertical cut.
 
+### 🌊 `--motion dive` — depth-parallax instead of Ken Burns (optional)
+
+An alternative shot motion that reads as **diving into the scene** — depth-based
+parallax (near moves faster than far), not a flat pan/zoom. Evaluated and measured
+in [`docs/spikes/2026-07-22-dive-motion-spike.md`](docs/spikes/2026-07-22-dive-motion-spike.md)
+(the upscaler pick in [`…-dive-upscaler-shootout.md`](docs/spikes/2026-07-22-dive-upscaler-shootout.md)).
+
+```bash
+python -m stillnorth loop --name boreal_dive --motion dive --stills <hashes> --audio wind
+```
+
+Per shot: an **Ollama coherency review of the still** (before any GPU is spent) →
+**upscale the still once to 4K** with the shootout-winning upscaler (`high-fidelity-4x`;
+sharpest without fabricating mesh) → **DepthFlow** dolly-in from the sharp texture →
+the pipeline's own `final_grade` + `final_unsharp`. The `1−cos` dolly returns to its
+first frame, so each shot self-loops; the slideshow wrap trick still closes the whole
+sequence. Measured: near/far flow ratio 1.9–5.6× (vs ~1.1× for Ken Burns), loop seam
+≈ 38 dB. Costs ~1 min/shot (coherency + upscale + render), vs Ken Burns's seconds.
+
+**DepthFlow is AGPL** — so it runs in its **own venv** and is invoked as a **CLI
+subprocess** (`dive_render.py`), never imported, keeping this repo's license clean.
+Rendered output is yours to monetize (the video is not a derivative of the code).
+Configure the `dive` block in `config/config.json` (`venv_python`, `upscaler`, `dolly`,
+`parallax`, `ssaa`, `judge_coherency`); default motion stays `kenburns`, so nothing
+changes unless you pass `--motion dive`.
+
 ---
 
 ## Requirements

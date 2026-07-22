@@ -330,6 +330,25 @@ class Config:
         self.ss_audio_kind = str(s.get("audio_kind", "wind"))
         self.ss_tiers = s.get("tiers", {"1min": 60, "30min": 1800, "1h": 3600})
 
+        # dive lane (OPTIONAL DepthFlow depth-parallax motion, an alternative to
+        # Ken Burns -- see docs/spikes/2026-07-22-dive-motion-spike.md). DepthFlow
+        # is AGPL, so it runs in its OWN venv, invoked as a subprocess
+        # (dive_render.py) -- never imported. Default off; kenburns stays default.
+        dv = self.raw.get("dive", {})
+        self.dive_enabled = bool(dv.get("enabled", False))
+        self.dive_venv_python = (os.path.normpath(dv["venv_python"])
+                                 if dv.get("venv_python") else "")
+        self.dive_render_script = os.path.normpath(dv.get(
+            "render_script", os.path.join(ROOT, "stillnorth", "dive_render.py")))
+        self.dive_hf_home = dv.get("hf_home", "")
+        self.dive_dolly = float(dv.get("dolly", 1.0))
+        self.dive_parallax = float(dv.get("parallax", 0.6))
+        self.dive_ssaa = float(dv.get("ssaa", 2.0))
+        # shootout winner 2026-07-22: high-fidelity-4x (sharp, no fabricated mesh
+        # on organic content); 'lanczos' = honest/no-fabrication fallback.
+        self.dive_upscaler = str(dv.get("upscaler", "high-fidelity-4x"))
+        self.dive_judge_coherency = bool(dv.get("judge_coherency", True))
+
     @staticmethod
     def _sibling_tool(ffmpeg_path, name):
         """Path to a tool that ships beside ffmpeg (e.g. ffprobe), keeping the

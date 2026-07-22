@@ -145,7 +145,7 @@ def xfade_chain_graph(durations, xfade, transition="fade"):
 # ---------------------------------------------------------------------------
 def build_slideshow(cfg, images, dst, hold=7.0, xfade=2.5, zoom=1.08,
                     height=2160, workdir=None, kenburns=True, cancel=None,
-                    log=None):
+                    log=None, motion="kenburns"):
     """Build one seamless-looping slideshow from prepared/unprepared stills.
 
     images   -- list of source still paths (any resolution/aspect).
@@ -169,25 +169,41 @@ def build_slideshow(cfg, images, dst, hold=7.0, xfade=2.5, zoom=1.08,
     for i, src in enumerate(images):
         if cancel and cancel():
             return None, 0.0
-        prepped = os.path.join(workdir, f"prep_{i:03d}.png")
-        if not prep_still(cfg, src, prepped, height):
-            _log(f"prep failed: {src}")
-            return None, 0.0
         clip = os.path.join(workdir, f"clip_{i:03d}.mp4")
-        if kenburns:
-            mode = "in" if i % 2 == 0 else "out"
-            pan = 1.0 if i % 4 in (0, 3) else -1.0
-            ok = kenburns_clip(cfg, prepped, clip, seg, zoom=zoom, mode=mode,
-                               pan=pan, height=height, fps=fps, cancel=cancel)
+        if motion == "dive":
+            # optional DepthFlow depth-parallax dive (subprocess to its own venv).
+            # dive_shot handles its own coherency gate + upscale + grade/unsharp
+            # from the raw still, so it skips prep_still. Imported lazily to keep
+            # the dive/AGPL surface out of the default kenburns path.
+            from . import dive
+            ok = dive.dive_shot(cfg, src, clip, seg, height=height,
+                                cancel=cancel, log=log)
+            if ok is None:        # coherency judge rejected -> skip, don't abort
+                _log(f"clip {i + 1}/{len(images)} skipped (coherency reject)")
+                continue
         else:
-            ok = static_clip(cfg, prepped, clip, seg, height=height, fps=fps,
-                             cancel=cancel)
+            prepped = os.path.join(workdir, f"prep_{i:03d}.png")
+            if not prep_still(cfg, src, prepped, height):
+                _log(f"prep failed: {src}")
+                return None, 0.0
+            if kenburns:
+                mode = "in" if i % 2 == 0 else "out"
+                pan = 1.0 if i % 4 in (0, 3) else -1.0
+                ok = kenburns_clip(cfg, prepped, clip, seg, zoom=zoom, mode=mode,
+                                   pan=pan, height=height, fps=fps, cancel=cancel)
+            else:
+                ok = static_clip(cfg, prepped, clip, seg, height=height, fps=fps,
+                                 cancel=cancel)
         if not ok:
-            _log(f"kenburns failed: {src}")
+            _log(f"clip {i} ({motion}) failed: {src}")
             return None, 0.0
         clips.append(clip)
         durations.append(seg)
         _log(f"clip {i + 1}/{len(images)} rendered")
+
+    if not clips:
+        _log("no clips produced (all stills skipped or failed)")
+        return None, 0.0
 
     # identical-frame wrap: a short static hold of clip-0's FIRST frame, so the
     # chain's last frame == its first frame -> -stream_loop is seamless.
