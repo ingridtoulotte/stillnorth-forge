@@ -104,6 +104,81 @@ The **Last done** card shows only the single most-recent artifact (latest image 
 
 ---
 
+## 🔁 Loop publishing (still-image slideshows)
+
+A second, **GPU-free** way to fill the channel (the "loop pivot"). Instead of
+rendering a catalog of hundreds of Wan clips, turn a handful of already-rendered
+4K stills into one **seamless-looping** ambient video, then multiply it into many
+uploads with ambient audio beds and duration tiers — all ffmpeg, no ComfyUI/GPU.
+It does **not** touch the Wan/FLUX render core.
+
+```bash
+# build one loop from source-still hashes (found in 03_classified/)
+python -m stillnorth loop --name boreal_journey \
+    --stills A_eb92140e13914713,B_128f86009656c97a,D_f0019bc3fa9086eb \
+    --audio wind
+```
+
+Outputs land in `12_slideshows/`: the base loop, one file per duration tier
+(`_1min` / `_30min` / `_1h`, each with a fresh ambient bed), and a 9:16 Shorts cut.
+
+**How the loop is seamless.** Each still gets a slow Ken Burns pass; consecutive
+stills cross-dissolve; then a short **identical-frame wrap clip** (a static hold of
+shot 1's first frame) is appended so the sequence's last frame is pixel-identical to
+its first. `ffmpeg -stream_loop` then repeats it with an invisible hard cut — no
+wrap-dissolve maths across the loop boundary (measured: loop-seam PSNR ≈ 39 dB, well
+above the video's own frame-to-frame motion floor ≈ 33 dB).
+
+**Audio is the multiplier.** Beds are procedural (`wind` / `rain` / `drone` /
+`still`), generated fresh at each tier's full length (never looped, so no audio
+seam). One visual loop × N beds = N videos at ~zero cost.
+
+Knobs live in the `slideshow` block of `config/config.json` (`hold_seconds`,
+`xfade_seconds`, `kenburns_zoom`, `height`, `audio_kind`, `tiers`). The
+`--no-kenburns` flag renders static stills; `--no-shorts` skips the vertical cut.
+
+### 🌊 `--motion dive` — depth-parallax instead of Ken Burns (optional)
+
+An alternative shot motion that reads as **diving into the scene** — depth-based
+parallax (near moves faster than far), not a flat pan/zoom. Evaluated and measured
+in [`docs/spikes/2026-07-22-dive-motion-spike.md`](docs/spikes/2026-07-22-dive-motion-spike.md)
+(the upscaler pick in [`…-dive-upscaler-shootout.md`](docs/spikes/2026-07-22-dive-upscaler-shootout.md)).
+
+```bash
+python -m stillnorth loop --name boreal_dive --motion dive --stills <hashes> --audio wind
+```
+
+Per shot: an **Ollama coherency review of the still** (before any GPU is spent) →
+**upscale the still once to 4K** with the shootout-winning upscaler (`high-fidelity-4x`;
+sharpest without fabricating mesh) → **DepthFlow** dolly-in from the sharp texture →
+the pipeline's own `final_grade` + `final_unsharp`. The `1−cos` dolly returns to its
+first frame, so each shot self-loops; the slideshow wrap trick still closes the whole
+sequence. Measured: near/far flow ratio 1.9–5.6× (vs ~1.1× for Ken Burns), loop seam
+≈ 38 dB. Costs ~1 min/shot (coherency + upscale + render), vs Ken Burns's seconds.
+
+**DepthFlow is AGPL** — so it runs in its **own venv** and is invoked as a **CLI
+subprocess** (`dive_render.py`), never imported, keeping this repo's license clean.
+Rendered output is yours to monetize (the video is not a derivative of the code).
+Configure the `dive` block in `config/config.json` (`venv_python`, `upscaler`, `dolly`,
+`parallax`, `ssaa`, `judge_coherency`); default motion stays `kenburns`, so nothing
+changes unless you pass `--motion dive`.
+
+### 🧮 `judge-stills` — bulk coherency pre-screen (optional)
+
+```bash
+python -m stillnorth judge-stills --stills all --batch-size 12
+```
+
+Judges every still in `03_classified/` (or a comma-separated hash list) for gross
+coherency, either one-by-one (`--batch-size 1`, default, exact — matches the
+production per-image judge) or several images per Ollama call (`--batch-size 10-12`,
+~2.1× faster but ~8-12% extra false-rejects on a still that would have passed solo —
+measured in [`…-batch-judge-benchmark.md`](docs/spikes/2026-07-22-batch-judge-benchmark.md)).
+Fails open on any Ollama error — a still is never silently dropped. Use solo for
+small curated picks, batch only when bulk-screening a large pool.
+
+---
+
 ## Requirements
 
 - **Python 3.9+** (3.12 recommended) — the server, queue, parser, ffmpeg orchestration and ComfyUI client are pure stdlib.

@@ -94,5 +94,25 @@
       "4": 4
     }
   },
-  "final_grade": "eq=contrast=0.93:gamma=1.04:saturation=0.97"
+  "final_grade": "eq=contrast=0.93:gamma=1.04:saturation=0.97",
+
+  "slideshow": {
+    "hold_seconds": 7.0,
+    "xfade_seconds": 2.5,
+    "kenburns_zoom": 1.08,
+    "height": 2160,
+    "audio_kind": "wind",
+    "tiers": {"1min": 60, "30min": 1800, "1h": 3600}
+  },
+
+  "dive": {
+    "enabled": true,
+    "venv_python": "D:/IA_PROJET/System/ComfyUI/output/StillNorthForge/99_dive_spike/venv/Scripts/python.exe",
+    "hf_home": "D:/IA_PROJET/System/ComfyUI/output/StillNorthForge/99_dive_spike/hfcache",
+    "dolly": 1.0,
+    "parallax": 0.6,
+    "ssaa": 2.0,
+    "upscaler": "high-fidelity-4x",
+    "judge_coherency": true
+  }
 }

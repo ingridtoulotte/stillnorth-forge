@@ -471,5 +471,134 @@ class TestConfigKeys(unittest.TestCase):
         self.assertEqual(STAGE_DIRS["review"], "10_review")
 
 
+class TestJudgeNumCtx(unittest.TestCase):
+    """Regression coverage for the 2026-07-22 context-size bug: Ollama's
+    default served context (4096) doesn't fit ONE image + IMAGE_PROMPT
+    (measured 4223 tokens needed), so every image-judge call was silently
+    HTTP-400ing and fail-opening through judge_image_ex's except-Exception,
+    with no visible error anywhere. See
+    docs/spikes/2026-07-22-batch-judge-benchmark.md for the full repro."""
+
+    def test_covers_measured_single_image_need(self):
+        self.assertGreater(judge._judge_num_ctx(1), 4223)
+        self.assertEqual(judge._judge_num_ctx(1), 6144)   # proven-working, pinned
+
+    def test_covers_measured_batch_needs(self):
+        self.assertGreater(judge._judge_num_ctx(5), 10947)
+        self.assertGreater(judge._judge_num_ctx(10), 18154)
+
+    def test_monotonic_in_image_count(self):
+        vals = [judge._judge_num_ctx(n) for n in (1, 3, 5, 10, 20)]
+        self.assertEqual(vals, sorted(vals))
+
+    def test_floor_never_below_6144(self):
+        self.assertGreaterEqual(judge._judge_num_ctx(0), 6144)
+        self.assertGreaterEqual(judge._judge_num_ctx(1), 6144)
+
+    def test_capped_at_32768(self):
+        # the spike benchmark hit a hard HTTP 413 around 20 images regardless
+        # of num_ctx -- nothing should ever request more than this ceiling.
+        self.assertEqual(judge._judge_num_ctx(1000), 32768)
+
+    def test_chat_passes_num_ctx_option(self):
+        captured = {}
+
+        class FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return b'{"message": {"content": "NONE"}}'
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data)
+            return FakeResp()
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            judge._chat(FakeCfg(), "prompt", ["img1"])
+        self.assertEqual(captured["body"]["options"]["num_ctx"],
+                         judge._judge_num_ctx(1))
+
+
+class TestBatchCoherencyParsing(unittest.TestCase):
+    def test_matches_by_index(self):
+        text = "1: NONE\n2: IMPOSSIBLE\n3: MINOR"
+        self.assertEqual(judge.parse_batch_coherency(text, 3),
+                         ["NONE", "IMPOSSIBLE", "MINOR"])
+
+    def test_out_of_order_lines(self):
+        # the model doesn't always answer in strict order -- the index prefix
+        # must still map each severity to the right image.
+        text = "2: MINOR\n1: NONE\n3: IMPOSSIBLE"
+        self.assertEqual(judge.parse_batch_coherency(text, 3),
+                         ["NONE", "MINOR", "IMPOSSIBLE"])
+
+    def test_dropped_line_is_none_not_crash(self):
+        text = "1: NONE\n3: IMPOSSIBLE"       # model skipped line 2
+        self.assertEqual(judge.parse_batch_coherency(text, 3),
+                         ["NONE", None, "IMPOSSIBLE"])
+
+    def test_case_insensitive_and_punctuation_variants(self):
+        text = "1) none\n2. impossible"
+        self.assertEqual(judge.parse_batch_coherency(text, 2),
+                         ["NONE", "IMPOSSIBLE"])
+
+
+class TestJudgeImagesBatch(unittest.TestCase):
+    def test_maps_severity_to_accept_reject(self):
+        with mock.patch.object(judge, "_chat",
+                               return_value="1: NONE\n2: IMPOSSIBLE\n3: MINOR"), \
+             mock.patch.object(judge, "_b64_image", side_effect=lambda p: f"b64:{p}"):
+            out = judge.judge_images_batch(FakeCfg(), ["a.png", "b.png", "c.png"])
+        self.assertEqual(out["a.png"], (True, "NONE"))
+        self.assertEqual(out["b.png"], (False, "IMPOSSIBLE"))   # only IMPOSSIBLE rejects
+        self.assertEqual(out["c.png"], (True, "MINOR"))
+
+    def test_unparsed_line_fails_open(self):
+        with mock.patch.object(judge, "_chat", return_value="1: NONE"), \
+             mock.patch.object(judge, "_b64_image", return_value="x"):
+            out = judge.judge_images_batch(FakeCfg(), ["a.png", "b.png"])
+        self.assertEqual(out["b.png"], (True, None))
+
+
+class TestJudgeStillsPrefilter(unittest.TestCase):
+    def test_fails_open_on_chat_error_never_drops_silently(self):
+        logs = []
+        with mock.patch.object(judge, "judge_images_batch",
+                               side_effect=RuntimeError("ollama down")):
+            accepted, rejected = judge.judge_stills_prefilter(
+                FakeCfg(), ["a.png", "b.png"], batch_size=12, log=logs.append)
+        self.assertEqual(accepted, ["a.png", "b.png"])
+        self.assertEqual(rejected, [])
+        self.assertTrue(any("unavailable" in m for m in logs))
+
+    def test_preserves_order_and_collects_rejections(self):
+        def fake_batch(cfg, paths):
+            return {p: ((False, "IMPOSSIBLE") if i == 1 else (True, "NONE"))
+                    for i, p in enumerate(paths)}
+
+        with mock.patch.object(judge, "judge_images_batch", side_effect=fake_batch):
+            accepted, rejected = judge.judge_stills_prefilter(
+                FakeCfg(), ["a.png", "b.png", "c.png"], batch_size=12)
+        self.assertEqual(accepted, ["a.png", "c.png"])
+        self.assertEqual(rejected, [{"path": "b.png", "severity": "IMPOSSIBLE"}])
+
+    def test_zero_batch_size_does_not_silently_drop_everything(self):
+        # regression: range() step and the chunk slice must clamp the SAME
+        # value, or batch_size<=0 makes every chunk empty and every still
+        # vanishes with zero exception, zero log line.
+        def fake_batch(cfg, paths):
+            return {p: (True, "NONE") for p in paths}
+
+        with mock.patch.object(judge, "judge_images_batch", side_effect=fake_batch):
+            accepted, rejected = judge.judge_stills_prefilter(
+                FakeCfg(), ["a.png", "b.png"], batch_size=0)
+        self.assertEqual(accepted, ["a.png", "b.png"])
+        self.assertEqual(rejected, [])
+
+
 if __name__ == "__main__":
     unittest.main()
